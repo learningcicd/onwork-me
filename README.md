@@ -1,244 +1,208 @@
 ### build.pkr.hcl
 
 ```bash
-#!/usr/bin/env bash
-# download_install_bin_sp.sh
+#!/bin/bash
 set -e
 
-# Source environment variables from .env
-if [[ -f /tmp/.env ]]; then
-    source /tmp/.env
-else
-    echo "ERROR: /tmp/.env not found"
-    exit 1
-fi
-
-DEST="/usr/wls-install-recepies/install-bin"
-PREFIX="${PREFIX:-}"
-DO_CHOWN="${DO_CHOWN:-oracle:oracle}"
-DO_CHMOD="${DO_CHMOD:-755}"
-
-usage(){ 
-    echo "Usage: sudo bash $0 [--account <storageAccount>] [--container <container>] [--prefix <prefix>]"
-}
-
-# Command-line arguments can override .env values (optional)
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --account) ACCOUNT="$2"; shift 2 ;;
-        --container) CONTAINER="$2"; shift 2 ;;
-        --prefix) PREFIX="$2"; shift 2 ;;
-        --chown) DO_CHOWN="$2"; shift 2 ;;
-        --chmod) DO_CHMOD="$2"; shift 2 ;;
-        -h|--help) usage; exit 0 ;;
-        *) echo "Unknown arg: $1"; usage; exit 1 ;;
+# Parse command line arguments
+AUTO_FSTAB=true  # Default to true for automation
+for arg in "$@"; do
+    case $arg in
+        --auto-fstab)
+            AUTO_FSTAB=true
+            shift
+            ;;
+        --interactive)
+            AUTO_FSTAB=false
+            shift
+            ;;
     esac
 done
 
-# Validate required variables
-if [[ -z "${ACCOUNT:-}" ]] || [[ -z "${CONTAINER:-}" ]]; then
-    echo "ERROR: ACCOUNT and CONTAINER must be set in /tmp/.env"
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'  # No Color
+
+# Log function
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
     exit 1
+}
+
+warn() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# Check if running as root or with sudo
+if [[ $EUID -ne 0 ]]; then
+    error "This script must be run as root or with sudo"
 fi
 
-# Validate Azure credentials
-if [[ -z "${AZ_TENANT_ID:-}" ]] || [[ -z "${AZ_CLIENT_ID:-}" ]] || [[ -z "${AZ_CLIENT_SECRET:-}" ]]; then
-    echo "ERROR: Azure credentials missing in /tmp/.env"
-    echo "Required: AZ_TENANT_ID, AZ_CLIENT_ID, AZ_CLIENT_SECRET"
-    exit 1
+# Load environment variables from .env file
+ENV_FILE="/tmp/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+    error "Environment file not found: $ENV_FILE"
 fi
 
-# Network connectivity check function
-check_connectivity() {
-    echo "🔍 Checking network connectivity..."
-    
-    # Test basic internet connectivity
-    if ! curl -I https://www.microsoft.com --max-time 10 >/dev/null 2>&1; then
-        echo "ERROR: No internet connectivity. Please check your network connection."
-        exit 1
-    fi
-    
-    # Test DNS resolution
-    if ! nslookup login.microsoftonline.com >/dev/null 2>&1; then
-        echo "ERROR: Cannot resolve Azure DNS names. Checking DNS settings..."
-        echo "Current DNS servers:"
-        cat /etc/resolv.conf
-        echo "Consider adding public DNS servers like 8.8.8.8 or 1.1.1.1"
-        exit 1
-    fi
-    
-    # Test Azure endpoints
-    local endpoints=(
-        "login.microsoftonline.com"
-        "${ACCOUNT}.blob.core.windows.net"
-    )
-    
-    for endpoint in "${endpoints[@]}"; do
-        if ! curl -s --connect-timeout 5 "https://${endpoint}" >/dev/null 2>&1; then
-            echo "WARNING: Cannot reach ${endpoint}. This may cause authentication issues."
-        else
-            echo "✅ Can reach ${endpoint}"
-        fi
-    done
-}
+log "Loading environment variables from $ENV_FILE"
+source "$ENV_FILE"
 
-# Load creds and configuration
-[[ -f "/tmp/.env" ]] || { echo "ERROR: /tmp/.env not found"; exit 1; }
-# shellcheck disable=SC1091
-dos2unix /tmp/.env 2>/dev/null || sed -i 's/\r$//' /tmp/.env
-source /tmp/.env
-: "${AZ_TENANT_ID:?Missing AZ_TENANT_ID in /tmp/.env}"
-: "${AZ_CLIENT_ID:?Missing AZ_CLIENT_ID in /tmp/.env}"
-: "${AZ_CLIENT_SECRET:?Missing AZ_CLIENT_SECRET in /tmp/.env}"
-# AZ_SUBSCRIPTION_ID is optional
-
-# Apply Python warnings setting if specified in /tmp/.env
-[[ -n "${PYTHONWARNINGS:-}" ]] && {
-    echo "📝 Applying PYTHONWARNINGS from /tmp/.env: $PYTHONWARNINGS"
-    export PYTHONWARNINGS
-}
-
-[[ $EUID -eq 0 ]] || { echo "Run as root (sudo)."; exit 1; }
-
-# Run connectivity check
-check_connectivity
-
-mkdir -p "$DEST"; chmod "$DO_CHMOD" "$DEST"; chown "$DO_CHOWN" "$DEST" || true
-
-install_azcli() {
-    echo "Installing Azure CLI on RHEL/CentOS..."
-    rpm --import https://packages.microsoft.com/keys/microsoft.asc
-    
-    cat > /etc/yum.repos.d/azure-cli.repo <<EOF
-[azure-cli]
-name=Azure CLI
-baseurl=https://packages.microsoft.com/yumrepos/azure-cli
-enabled=1
-gpgcheck=1
-gpgkey=https://packages.microsoft.com/keys/microsoft.asc
-EOF
-    
-    dnf install -y azure-cli
-}
-
-install_azcli
-az version
-
-# Configure SSL/TLS and certificate handling
-configure_ssl() {
-    echo "🔒 Configuring SSL certificates..."
-    
-    # Update CA certificates
-    if command -v update-ca-certificates >/dev/null 2>&1; then
-        update-ca-certificates >/dev/null 2>&1 || true
-    elif command -v update-ca-trust >/dev/null 2>&1; then
-        update-ca-trust >/dev/null 2>&1 || true
-    fi
-    
-    # Set Azure CLI SSL configuration
-    export AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=0
-    export PYTHONHTTPSVERIFY=1
-    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-    
-    # Alternative paths for different distros
-    if [[ ! -f "$REQUESTS_CA_BUNDLE" ]]; then
-        for ca_bundle in "/etc/ssl/certs/ca-bundle.crt" "/etc/pki/tls/certs/ca-bundle.crt"; do
-            if [[ -f "$ca_bundle" ]]; then
-                export REQUESTS_CA_BUNDLE="$ca_bundle"
-                break
-            fi
-        done
-    fi
-}
-
-configure_ssl
-
-# Suppress only the urllib3 warning, not disable verification
-export PYTHONWARNINGS="ignore:Unverified HTTPS request"
-
-echo "🔐 Logging in (allow-no-subscriptions)..."
-# Add retry logic and better error handling
-for attempt in 1 2 3; do
-    echo "Login attempt $attempt/3..."
-    echo "AZ_CLIENT_ID=$AZ_CLIENT_ID"
-    echo "AZ_TENANT_ID=$AZ_TENANT_ID"
-    echo "AZ_CLIENT_SECRET=$AZ_CLIENT_SECRET"
-    
-    if az login --debug \
-        --service-principal \
-        --username "$AZ_CLIENT_ID" \
-        --password "$AZ_CLIENT_SECRET" \
-        --tenant "$AZ_TENANT_ID" \
-        --allow-no-subscriptions; then
-        echo "✅ Login successful"
-        break
-    else
-        echo "❌ Login attempt $attempt failed"
-        if [[ $attempt -eq 3 ]]; then
-            echo "ERROR: All login attempts failed. Please check:"
-            echo "1. Network connectivity to Azure"
-            echo "2. Service Principal credentials are correct"
-            echo "3. Tenant ID is correct"
-            echo "4. DNS resolution is working"
-            exit 1
-        fi
-        sleep 5
+# Validate required environment variables
+REQUIRED_VARS=("AZURE_FS_ENDPOINT" "AZ_TENANT_ID" "AZ_CLIENT_ID" "AZ_CLIENT_SECRET")
+for var in "${REQUIRED_VARS[@]}"; do
+    if [[ -z "${!var}" ]]; then
+        error "Required environment variable $var is not set in $ENV_FILE"
     fi
 done
 
-[[ -n "${AZ_SUBSCRIPTION_ID:-}" ]] && {
-    echo "Setting subscription to ${AZ_SUBSCRIPTION_ID}..."
-    az account set --subscription "$AZ_SUBSCRIPTION_ID" >/dev/null 2>&1 || true
-}
+# Parse Azure File Share endpoint
+# Expected format: https://<storage-account>.file.core.windows.net/<share-name>
+STORAGE_ACCOUNT=$(echo "$AZURE_FS_ENDPOINT" | sed -E 's|https://([^.]+)\..*|\1|')
+SHARE_NAME=$(echo "$AZURE_FS_ENDPOINT" | sed -E 's|.*/([^/]+)$|\1|')
+APPLOGS_SHARE_NAME=$(echo "$AZURE_FS_ENDPOINT_APPLOGS" | sed -n 's|.*/\([^/]*\)|\1|p')
 
-# Sanity checks with better error handling
-echo "🔍 Sanity checks: verify container and listing blobs."
-if ! az storage container show --name "$CONTAINER" --account-name "$ACCOUNT" --auth-mode login >/dev/null 2>&1; then
-    echo "ERROR: Cannot access container '$CONTAINER' in storage account '$ACCOUNT'"
-    echo "Please verify:"
-    echo "1. Storage account name is correct"
-    echo "2. Container exists"
-    echo "3. Service principal has proper permissions (Storage Blob Data Reader/Contributor)"
-    echo "4. Network allows access to ${ACCOUNT}.blob.core.windows.net"
+log "Storage Account: $STORAGE_ACCOUNT"
+log "Share Name: $SHARE_NAME"
+log "Applogs Share Name: $APPLOGS_SHARE_NAME"
+
+# Destination directory
+DEST_DIR="/domains"
+MOUNT_POINT="/shareddomainconfig"
+MOUNT_POINT1="/Application_logs"
+
+# Create directories if they don't exist
+mkdir -p "$DEST_DIR"
+mkdir -p "$MOUNT_POINT"
+mkdir -p "$MOUNT_POINT1"
+
+# Check if cifs-utils is installed
+if ! command -v mount.cifs &> /dev/null; then
+    log "Installing cifs-utils..."
+    if command -v apt-get &> /dev/null; then
+        apt-get update && apt-get install -y cifs-utils
+    elif command -v yum &> /dev/null; then
+        yum install -y cifs-utils
+    else
+        error "Cannot install cifs-utils. Please install it manually."
+    fi
+fi
+
+# Check if Azure CLI is installed
+if ! command -v az &> /dev/null; then
+    log "Installing Azure CLI..."
+    curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+fi
+
+# Login to Azure using service principal
+log "Authenticating with Azure..."
+if ! az account show &>/dev/null; then
+    az login --service-principal \
+        --username "$AZ_CLIENT_ID" \
+        --password "$AZ_CLIENT_SECRET" \
+        --tenant "$AZ_TENANT_ID" &> /dev/null || error "Azure authentication failed"
+else
+    log "Already authenticated with Azure"
+fi
+
+# Set subscription if provided
+if [[ -n "${AZ_SUBSCRIPTION_ID:-}" ]]; then
+    az account set --subscription "$AZ_SUBSCRIPTION_ID" || warn "Failed to set subscription, continuing..."
+fi
+
+# Get storage account key
+log "Retrieving storage account key..."
+STORAGE_KEY=$(az storage account keys list \
+    --account-name "$STORAGE_ACCOUNT" \
+    --query "[0].value" \
+    --output tsv) || error "Failed to retrieve storage account key"
+
+# Check if already mounted and unmount if necessary
+if mountpoint -q "$MOUNT_POINT"; then
+    log "Unmounting existing mount at $MOUNT_POINT"
+    umount "$MOUNT_POINT" || warn "Failed to unmount $MOUNT_POINT"
+fi
+
+if mountpoint -q "$MOUNT_POINT1"; then
+    log "Unmounting existing mount at $MOUNT_POINT1"
+    umount "$MOUNT_POINT1" || warn "Failed to unmount $MOUNT_POINT1"
+fi
+
+# Mount Azure File Share
+log "Mounting Azure File Share..."
+mount -t cifs \
+    "//${STORAGE_ACCOUNT}.file.core.windows.net/${SHARE_NAME}" \
+    "$MOUNT_POINT" \
+    -o username="$STORAGE_ACCOUNT",password="$STORAGE_KEY",dir_mode=0755,file_mode=0755,serverino || \
+    error "Failed to mount Azure File Share at $MOUNT_POINT"
+
+mount -t cifs \
+    "//${STORAGE_ACCOUNT}.file.core.windows.net/${APPLOGS_SHARE_NAME}" \
+    "$MOUNT_POINT1" \
+    -o username="$STORAGE_ACCOUNT",password="$STORAGE_KEY",dir_mode=0755,file_mode=0755,serverino || \
+    error "Failed to mount Azure File Share at $MOUNT_POINT1"
+
+if [[ $? -eq 0 ]]; then
+    log "Azure file share mounted successfully at $MOUNT_POINT1"
+    
+    # Add to /etc/fstab for persistent mount
+    if [[ "$AUTO_FSTAB" = true ]]; then
+        FSTAB_ENTRY="//${STORAGE_ACCOUNT}.file.core.windows.net/$APPLOGS_SHARE_NAME $MOUNT_POINT1 cifs nofail,vers=3.0,username=$STORAGE_ACCOUNT,password=$STORAGE_KEY,dir_mode=0777,file_mode=0777,serverino,uid=$(id -u oracle),gid=$(id -g oracle) 0 0"
+        
+        # Check if entry already exists
+        if grep -q "$MOUNT_POINT1" /etc/fstab; then
+            log "Entry for $MOUNT_POINT1 already exists in /etc/fstab"
+        else
+            echo "$FSTAB_ENTRY" | sudo tee -a /etc/fstab > /dev/null
+            log "Entry added to /etc/fstab for persistent mounting"
+        fi
+    elif [[ "$AUTO_FSTAB" = false ]]; then
+        read -p "Do you want to add this mount to /etc/fstab for persistent mounting? (y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            FSTAB_ENTRY="//${STORAGE_ACCOUNT}.file.core.windows.net/$APPLOGS_SHARE_NAME $MOUNT_POINT1 cifs nofail,vers=3.0,username=$STORAGE_ACCOUNT,password=$STORAGE_KEY,dir_mode=0777,file_mode=0777,serverino,uid=$(id -u oracle),gid=$(id -g oracle) 0 0"
+            
+            # Check if entry already exists  
+            if grep -q "$MOUNT_POINT1" /etc/fstab; then
+                log "Entry for $MOUNT_POINT1 already exists in /etc/fstab"
+            else
+                echo "$FSTAB_ENTRY" | sudo tee -a /etc/fstab > /dev/null
+                log "Entry added to /etc/fstab"
+            fi
+        fi
+    fi
+else
+    log "Failed to mount Azure file share"
     exit 1
 fi
 
-BLOB_COUNT=$(az storage blob list \
-    --container-name "$CONTAINER" \
-    --account-name "$ACCOUNT" \
-    --auth-mode login \
-    ${PREFIX:+--prefix "$PREFIX"} \
-    --query 'length(@)' -o tsv 2>/dev/null || echo 0)
+# Install the rsync utility
+log "Installing rsync utility..."
+sudo yum -y install rsync
 
-echo "Found ${BLOB_COUNT} blobs under ${CONTAINER}/${PREFIX:-}"
+# Copy files
+log "Copying files from $MOUNT_POINT to $DEST_DIR..."
+rsync -avh --progress "$MOUNT_POINT/" "$DEST_DIR/" || error "Failed to copy files"
 
-if [[ "$BLOB_COUNT" -eq 0 ]]; then
-    echo "WARNING: No blobs found. Check the prefix path if specified."
-fi
+# Change ownership and permissions
+log "Setting ownership to oracle:oracle for $DEST_DIR..."
+chown -R oracle:oracle "$DEST_DIR" || error "Failed to change ownership"
 
-# Download with better error handling
-echo "⬇️ Downloading blobs from ${ACCOUNT}/${CONTAINER} → ${DEST} …"
-if ! az storage blob download \
-    --account-name "$ACCOUNT" \
-    --auth-mode login \
-    --container-name "$CONTAINER" \
-    --name "jdk1.8.0_271.tar.gz" \
-    --file "${DEST}/jdk1.8.0_271.tar.gz"; then
-    echo "ERROR: Download of JDK failed. Check network connectivity and permissions."
-    exit 1
-fi
+log "Setting permissions to 755 for $DEST_DIR..."
+chmod -R 755 "$DEST_DIR" || error "Failed to change permissions"
 
-if ! az storage blob download \
-    --account-name "$ACCOUNT" \
-    --auth-mode login \
-    --container-name "$CONTAINER" \
-    --name "weblogic_binaries.tar" \
-    --file "${DEST}/weblogic_binaries.tar"; then
-    echo "ERROR: Download of WEBLOGIC failed. Check network connectivity and permissions."
-    exit 1
-fi
+# Unmount
+log "Unmounting Azure File Share..."
+umount "$MOUNT_POINT"
 
-chmod -R "$DO_CHMOD" "$DEST" || true
-chown -R "$DO_CHOWN" "$DEST" || true
-echo "✅ All blobs downloaded to ${DEST}"
+# Logout from Azure
+az logout &> /dev/null
+
+log "Successfully copied Azure File Share content to $DEST_DIR"
+log "Operation completed successfully!""
 ```
