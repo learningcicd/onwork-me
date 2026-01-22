@@ -135,6 +135,9 @@ fi
 total_blobs=$(echo "$blob_list" | wc -l)
 log_info "Found $total_blobs blobs to download"
 echo ""
+log_info "Blob list:"
+echo "$blob_list"
+echo ""
 
 # Download each blob
 while IFS= read -r blob_name; do
@@ -142,30 +145,35 @@ while IFS= read -r blob_name; do
         continue
     fi
     
+    log_info "Processing blob: '$blob_name'"
+    
     # Create local file path
     local_file="$DOWNLOAD_DIR/$blob_name"
     local_dir=$(dirname "$local_file")
     
     # Create directory structure if needed
     if [ ! -d "$local_dir" ]; then
+        log_info "Creating directory: $local_dir"
         mkdir -p "$local_dir"
     fi
     
-    echo "Downloading: $blob_name -> $local_file"
+    echo "Downloading: $blob_name"
+    echo "  To: $local_file"
     
-    # Download with better error handling
-    if az storage blob download \
+    # Download with full output visible
+    download_output=$(az storage blob download \
         --account-name "$STORAGE_ACCOUNT" \
         --container-name "$CONTAINER_DOWNLOAD" \
         --name "$blob_name" \
         --file "$local_file" \
         --auth-mode login \
-        --overwrite 2>&1; then
-        
+        --overwrite 2>&1) || download_failed=true
+    
+    if [ -z "${download_failed}" ]; then
         # Verify file was actually created
         if [ -f "$local_file" ]; then
             file_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null || echo "0")
-            echo "  Success: Downloaded $file_size bytes"
+            log_info "Success: Downloaded $file_size bytes"
             ((downloaded_count++))
             
             # Check if it's a tar file and extract it
@@ -182,11 +190,14 @@ while IFS= read -r blob_name; do
             fi
         else
             log_error "File not created: $local_file"
+            log_error "Download output: $download_output"
             ((failed_count++))
         fi
     else
         log_error "Failed to download: $blob_name"
+        log_error "Error output: $download_output"
         ((failed_count++))
+        unset download_failed
     fi
     echo ""
 done <<< "$blob_list"
@@ -203,7 +214,6 @@ fi
 az logout > /dev/null 2>&1
 
 exit 0
-
 
 
 
