@@ -40,7 +40,7 @@ source "$ENV_FILE"
 set +a
 
 # Validate required environment variables
-required_vars=("AZ_TENANT_ID" "AZ_CLIENT_ID" "AZ_CLIENT_SECRET" "AZ_SUBSCRIPTION_ID" "ACCOUNT" "CONTAINER")
+required_vars=("AZ_TENANT_ID" "AZ_CLIENT_ID" "AZ_CLIENT_SECRET" "AZ_SUBSCRIPTION_ID" "ACCOUNT" "CONTAINER_DOWNLOAD")
 for var in "${required_vars[@]}"; do
     if [ -z "${!var}" ]; then
         log_error "Required environment variable $var is not set in .env file"
@@ -51,13 +51,13 @@ done
 # Configuration
 DOWNLOAD_DIR="/oracle/systemctl_scripts"
 STORAGE_ACCOUNT="${ACCOUNT}"
-CONTAINER="${CONTAINER}"
+CONTAINER_DOWNLOAD="${CONTAINER_DOWNLOAD}"
 SOURCE_PREFIX="${SOURCE_PREFIX:-}"  # Optional: download only files with this prefix
 
 log_info "Configuration:"
 echo "  Download Directory: $DOWNLOAD_DIR"
 echo "  Storage Account: $STORAGE_ACCOUNT"
-echo "  Container: $CONTAINER"
+echo "  Container: $CONTAINER_DOWNLOAD"
 if [ -n "$SOURCE_PREFIX" ]; then
     echo "  Source Prefix: $SOURCE_PREFIX"
 fi
@@ -100,8 +100,8 @@ fi
 
 # Verify container exists
 log_info "Verifying container..."
-if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCOUNT" &> /dev/null; then
-    log_error "Container '$CONTAINER' not found in storage account '$STORAGE_ACCOUNT'"
+if ! az storage container show --name "$CONTAINER_DOWNLOAD" --account-name "$STORAGE_ACCOUNT" &> /dev/null; then
+    log_error "Container '$CONTAINER_DOWNLOAD' not found in storage account '$STORAGE_ACCOUNT'"
     exit 1
 fi
 
@@ -115,14 +115,14 @@ log_info "Listing blobs in container..."
 if [ -n "$SOURCE_PREFIX" ]; then
     blob_list=$(az storage blob list \
         --account-name "$STORAGE_ACCOUNT" \
-        --container-name "$CONTAINER" \
+        --container-name "$CONTAINER_DOWNLOAD" \
         --prefix "$SOURCE_PREFIX" \
         --auth-mode login \
         --query "[].name" -o tsv)
 else
     blob_list=$(az storage blob list \
         --account-name "$STORAGE_ACCOUNT" \
-        --container-name "$CONTAINER" \
+        --container-name "$CONTAINER_DOWNLOAD" \
         --auth-mode login \
         --query "[].name" -o tsv)
 fi
@@ -153,18 +153,42 @@ while IFS= read -r blob_name; do
     
     echo "Downloading: $blob_name -> $local_file"
     
+    # Download with better error handling
     if az storage blob download \
         --account-name "$STORAGE_ACCOUNT" \
-        --container-name "$CONTAINER" \
+        --container-name "$CONTAINER_DOWNLOAD" \
         --name "$blob_name" \
         --file "$local_file" \
         --auth-mode login \
-        --overwrite 2>&1 | grep -v "Percent complete"; then
-        ((downloaded_count++))
+        --overwrite 2>&1; then
+        
+        # Verify file was actually created
+        if [ -f "$local_file" ]; then
+            file_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null || echo "0")
+            echo "  Success: Downloaded $file_size bytes"
+            ((downloaded_count++))
+            
+            # Check if it's a tar file and extract it
+            if [[ "$local_file" == *.tar || "$local_file" == *.tar.gz || "$local_file" == *.tgz ]]; then
+                log_info "Extracting tar file: $local_file"
+                if tar -xf "$local_file" -C "$local_dir"; then
+                    log_info "Successfully extracted: $local_file"
+                    # Optionally remove the tar file after extraction
+                    # rm "$local_file"
+                    # log_info "Removed tar file: $local_file"
+                else
+                    log_error "Failed to extract: $local_file"
+                fi
+            fi
+        else
+            log_error "File not created: $local_file"
+            ((failed_count++))
+        fi
     else
         log_error "Failed to download: $blob_name"
         ((failed_count++))
     fi
+    echo ""
 done <<< "$blob_list"
 
 # Summary
@@ -179,6 +203,7 @@ fi
 az logout > /dev/null 2>&1
 
 exit 0
+
 
 
 
