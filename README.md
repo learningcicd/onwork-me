@@ -33,7 +33,11 @@ fi
 
 # Load environment variables from .env file
 log_info "Loading environment variables from .env file..."
-export $(grep -v '^#' "$ENV_FILE" | xargs)
+# Remove Windows line endings and source the file
+sed -i 's/\r$//' "$ENV_FILE" 2>/dev/null || true
+set -a
+source "$ENV_FILE"
+set +a
 
 # Validate required environment variables
 required_vars=("AZ_TENANT_ID" "AZ_CLIENT_ID" "AZ_CLIENT_SECRET" "AZ_SUBSCRIPTION_ID" "ACCOUNT" "CONTAINER")
@@ -46,6 +50,8 @@ done
 
 # Configuration
 SOURCE_DIR="/home/guava/wls_ftAdminpacker_Rakesh/recepies/wlstscripts_onboot"
+# Remove trailing slash if present
+SOURCE_DIR="${SOURCE_DIR%/}"
 STORAGE_ACCOUNT="${ACCOUNT}"
 CONTAINER="${CONTAINER}"
 TARGET_DIR="tn_dev"
@@ -106,10 +112,13 @@ failed_count=0
 # Function to upload a single file
 upload_file() {
     local file_path="$1"
-    local relative_path="${file_path#$SOURCE_DIR/}"
+    # Get relative path by removing SOURCE_DIR prefix
+    local relative_path="${file_path#$SOURCE_DIR}"
+    # Remove leading slash if present
+    relative_path="${relative_path#/}"
     local blob_path="$TARGET_DIR/$relative_path"
     
-    log_info "Uploading: $relative_path"
+    echo "Uploading: $relative_path -> $blob_path"
     
     if az storage blob upload \
         --account-name "$STORAGE_ACCOUNT" \
@@ -117,11 +126,12 @@ upload_file() {
         --name "$blob_path" \
         --file "$file_path" \
         --overwrite \
-        --auth-mode login > /dev/null 2>&1; then
+        --auth-mode login 2>&1 | grep -v "Percent complete"; then
         ((uploaded_count++))
     else
         log_error "Failed to upload: $relative_path"
         ((failed_count++))
+        return 1
     fi
 }
 
@@ -138,12 +148,17 @@ export failed_count
 
 # Find and upload all files recursively
 log_info "Starting recursive upload from $SOURCE_DIR..."
+log_info "Discovering files..."
+
+# Count total files first
+total_files=$(find "$SOURCE_DIR" -type f | wc -l)
+log_info "Found $total_files files to upload"
 echo ""
 
 # Use find to get all files and upload them
 while IFS= read -r -d '' file; do
     if [ -f "$file" ]; then
-        upload_file "$file"
+        upload_file "$file" || true
     fi
 done < <(find "$SOURCE_DIR" -type f -print0)
 
@@ -159,5 +174,6 @@ fi
 az logout > /dev/null 2>&1
 
 exit 0
+
 
 ```
