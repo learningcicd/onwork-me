@@ -6,8 +6,6 @@
 # Script to download files from Azure Blob Storage
 # Reads configuration from .env file
 
-set -e  # Exit on error
-
 # Function to print messages
 log_info() {
     echo "[INFO] $1"
@@ -154,22 +152,29 @@ while IFS= read -r blob_name; do
     # Create directory structure if needed
     if [ ! -d "$local_dir" ]; then
         log_info "Creating directory: $local_dir"
-        mkdir -p "$local_dir"
+        mkdir -p "$local_dir" || {
+            log_error "Failed to create directory: $local_dir"
+            ((failed_count++))
+            continue
+        }
     fi
     
     echo "Downloading: $blob_name"
     echo "  To: $local_file"
     
     # Download with full output visible
+    set +e  # Temporarily disable exit on error
     download_output=$(az storage blob download \
         --account-name "$STORAGE_ACCOUNT" \
         --container-name "$CONTAINER_DOWNLOAD" \
         --name "$blob_name" \
         --file "$local_file" \
         --auth-mode login \
-        --overwrite 2>&1) || download_failed=true
+        --overwrite 2>&1)
+    download_status=$?
+    set -e  # Re-enable exit on error
     
-    if [ -z "${download_failed}" ]; then
+    if [ $download_status -eq 0 ]; then
         # Verify file was actually created
         if [ -f "$local_file" ]; then
             file_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null || echo "0")
@@ -179,7 +184,11 @@ while IFS= read -r blob_name; do
             # Check if it's a tar file and extract it
             if [[ "$local_file" == *.tar || "$local_file" == *.tar.gz || "$local_file" == *.tgz ]]; then
                 log_info "Extracting tar file: $local_file"
-                if tar -xf "$local_file" -C "$local_dir"; then
+                set +e
+                tar -xf "$local_file" -C "$local_dir"
+                tar_status=$?
+                set -e
+                if [ $tar_status -eq 0 ]; then
                     log_info "Successfully extracted: $local_file"
                     # Optionally remove the tar file after extraction
                     # rm "$local_file"
@@ -194,10 +203,9 @@ while IFS= read -r blob_name; do
             ((failed_count++))
         fi
     else
-        log_error "Failed to download: $blob_name"
+        log_error "Failed to download: $blob_name (exit code: $download_status)"
         log_error "Error output: $download_output"
         ((failed_count++))
-        unset download_failed
     fi
     echo ""
 done <<< "$blob_list"
@@ -214,7 +222,6 @@ fi
 az logout > /dev/null 2>&1
 
 exit 0
-
 
 
 ```
