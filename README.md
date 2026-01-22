@@ -21,15 +21,19 @@ log_warn() {
     echo "[WARN] $1"
 }
 
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+
 # Check if .env file exists
-if [ ! -f .env ]; then
-    log_error ".env file not found in current directory"
+if [ ! -f "$ENV_FILE" ]; then
+    log_error ".env file not found at: $ENV_FILE"
     exit 1
 fi
 
 # Load environment variables from .env file
 log_info "Loading environment variables from .env file..."
-export $(grep -v '^#' .env | xargs)
+export $(grep -v '^#' "$ENV_FILE" | xargs)
 
 # Validate required environment variables
 required_vars=("AZ_TENANT_ID" "AZ_CLIENT_ID" "AZ_CLIENT_SECRET" "AZ_SUBSCRIPTION_ID" "ACCOUNT" "CONTAINER")
@@ -155,5 +159,5 @@ fi
 az logout > /dev/null 2>&1
 
 exit 0
-"
+
 ```
