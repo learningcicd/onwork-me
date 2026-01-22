@@ -3,7 +3,7 @@
 ```bash
 #!/bin/bash
 
-# Script to upload files recursively to Azure Blob Storage
+# Script to download files from Azure Blob Storage
 # Reads configuration from .env file
 
 set -e  # Exit on error
@@ -49,23 +49,23 @@ for var in "${required_vars[@]}"; do
 done
 
 # Configuration
-SOURCE_DIR="/home/guava/wls_ftAdminpacker_Rakesh/recepies/wlstscripts_onboot"
-# Remove trailing slash if present
-SOURCE_DIR="${SOURCE_DIR%/}"
+DOWNLOAD_DIR="/oracle/systemctl_scripts"
 STORAGE_ACCOUNT="${ACCOUNT}"
 CONTAINER="${CONTAINER}"
-TARGET_DIR="tn_dev"
+SOURCE_PREFIX="${SOURCE_PREFIX:-}"  # Optional: download only files with this prefix
 
 log_info "Configuration:"
-echo "  Source Directory: $SOURCE_DIR"
+echo "  Download Directory: $DOWNLOAD_DIR"
 echo "  Storage Account: $STORAGE_ACCOUNT"
 echo "  Container: $CONTAINER"
-echo "  Target Directory: $TARGET_DIR"
+if [ -n "$SOURCE_PREFIX" ]; then
+    echo "  Source Prefix: $SOURCE_PREFIX"
+fi
 
-# Check if source directory exists
-if [ ! -d "$SOURCE_DIR" ]; then
-    log_error "Source directory does not exist: $SOURCE_DIR"
-    exit 1
+# Create download directory if it doesn't exist
+if [ ! -d "$DOWNLOAD_DIR" ]; then
+    log_info "Creating download directory: $DOWNLOAD_DIR"
+    mkdir -p "$DOWNLOAD_DIR"
 fi
 
 # Check if Azure CLI is installed
@@ -105,67 +105,72 @@ if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE_ACCO
     exit 1
 fi
 
-# Counter for uploaded files
-uploaded_count=0
+# Counter for downloaded files
+downloaded_count=0
 failed_count=0
+skipped_count=0
 
-# Function to upload a single file
-upload_file() {
-    local file_path="$1"
-    # Get relative path by removing SOURCE_DIR prefix
-    local relative_path="${file_path#$SOURCE_DIR}"
-    # Remove leading slash if present
-    relative_path="${relative_path#/}"
-    local blob_path="$TARGET_DIR/$relative_path"
-    
-    echo "Uploading: $relative_path -> $blob_path"
-    
-    if az storage blob upload \
+# List all blobs in container
+log_info "Listing blobs in container..."
+if [ -n "$SOURCE_PREFIX" ]; then
+    blob_list=$(az storage blob list \
         --account-name "$STORAGE_ACCOUNT" \
         --container-name "$CONTAINER" \
-        --name "$blob_path" \
-        --file "$file_path" \
-        --overwrite \
-        --auth-mode login 2>&1 | grep -v "Percent complete"; then
-        ((uploaded_count++))
-    else
-        log_error "Failed to upload: $relative_path"
-        ((failed_count++))
-        return 1
-    fi
-}
+        --prefix "$SOURCE_PREFIX" \
+        --auth-mode login \
+        --query "[].name" -o tsv)
+else
+    blob_list=$(az storage blob list \
+        --account-name "$STORAGE_ACCOUNT" \
+        --container-name "$CONTAINER" \
+        --auth-mode login \
+        --query "[].name" -o tsv)
+fi
 
-# Export function so it can be used with find
-export -f upload_file
-export -f log_info
-export -f log_error
-export SOURCE_DIR
-export TARGET_DIR
-export STORAGE_ACCOUNT
-export CONTAINER
-export uploaded_count
-export failed_count
+if [ -z "$blob_list" ]; then
+    log_warn "No blobs found in container"
+    exit 0
+fi
 
-# Find and upload all files recursively
-log_info "Starting recursive upload from $SOURCE_DIR..."
-log_info "Discovering files..."
-
-# Count total files first
-total_files=$(find "$SOURCE_DIR" -type f | wc -l)
-log_info "Found $total_files files to upload"
+total_blobs=$(echo "$blob_list" | wc -l)
+log_info "Found $total_blobs blobs to download"
 echo ""
 
-# Use find to get all files and upload them
-while IFS= read -r -d '' file; do
-    if [ -f "$file" ]; then
-        upload_file "$file" || true
+# Download each blob
+while IFS= read -r blob_name; do
+    if [ -z "$blob_name" ]; then
+        continue
     fi
-done < <(find "$SOURCE_DIR" -type f -print0)
+    
+    # Create local file path
+    local_file="$DOWNLOAD_DIR/$blob_name"
+    local_dir=$(dirname "$local_file")
+    
+    # Create directory structure if needed
+    if [ ! -d "$local_dir" ]; then
+        mkdir -p "$local_dir"
+    fi
+    
+    echo "Downloading: $blob_name -> $local_file"
+    
+    if az storage blob download \
+        --account-name "$STORAGE_ACCOUNT" \
+        --container-name "$CONTAINER" \
+        --name "$blob_name" \
+        --file "$local_file" \
+        --auth-mode login \
+        --overwrite 2>&1 | grep -v "Percent complete"; then
+        ((downloaded_count++))
+    else
+        log_error "Failed to download: $blob_name"
+        ((failed_count++))
+    fi
+done <<< "$blob_list"
 
 # Summary
 echo ""
-log_info "Upload completed!"
-echo "  Files uploaded: $uploaded_count"
+log_info "Download completed!"
+echo "  Files downloaded: $downloaded_count"
 if [ $failed_count -gt 0 ]; then
     log_warn "Files failed: $failed_count"
 fi
@@ -174,6 +179,7 @@ fi
 az logout > /dev/null 2>&1
 
 exit 0
+
 
 
 ```
