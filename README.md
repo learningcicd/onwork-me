@@ -163,7 +163,6 @@ while IFS= read -r blob_name; do
     echo "  To: $local_file"
     
     # Download with full output visible
-    set +e  # Temporarily disable exit on error
     download_output=$(az storage blob download \
         --account-name "$STORAGE_ACCOUNT" \
         --container-name "$CONTAINER_DOWNLOAD" \
@@ -172,7 +171,6 @@ while IFS= read -r blob_name; do
         --auth-mode login \
         --overwrite 2>&1)
     download_status=$?
-    set -e  # Re-enable exit on error
     
     if [ $download_status -eq 0 ]; then
         # Verify file was actually created
@@ -184,17 +182,15 @@ while IFS= read -r blob_name; do
             # Check if it's a tar file and extract it
             if [[ "$local_file" == *.tar || "$local_file" == *.tar.gz || "$local_file" == *.tgz ]]; then
                 log_info "Extracting tar file: $local_file"
-                set +e
-                tar -xf "$local_file" -C "$local_dir"
+                tar -xf "$local_file" -C "$local_dir" 2>&1
                 tar_status=$?
-                set -e
                 if [ $tar_status -eq 0 ]; then
                     log_info "Successfully extracted: $local_file"
                     # Optionally remove the tar file after extraction
                     # rm "$local_file"
                     # log_info "Removed tar file: $local_file"
                 else
-                    log_error "Failed to extract: $local_file"
+                    log_error "Failed to extract: $local_file (exit code: $tar_status)"
                 fi
             fi
         else
