@@ -24,24 +24,29 @@ echo "Setting subscription..."
 az account set --subscription "$AZ_SUBSCRIPTION_ID"
 
 echo "Listing blobs..."
-az storage blob list \
+blob_json=$(az storage blob list \
     --account-name "$ACCOUNT" \
     --container-name "$CONTAINER_DOWNLOAD" \
     --auth-mode login \
-    --output table
+    --output json)
+
+echo "$blob_json" | jq -r '.[] | .name'
 
 echo ""
-echo "Downloading ALL blobs using az storage blob download-batch..."
-az storage blob download-batch \
-    --account-name "$ACCOUNT" \
-    --source "$CONTAINER_DOWNLOAD" \
-    --destination "$DOWNLOAD_DIR" \
-    --auth-mode login \
-    --overwrite
+echo "Downloading blobs individually..."
+echo "$blob_json" | jq -r '.[] | .name' | while read -r blob_name; do
+    echo "Downloading: $blob_name"
+    az storage blob download \
+        --account-name "$ACCOUNT" \
+        --container-name "$CONTAINER_DOWNLOAD" \
+        --name "$blob_name" \
+        --file "$DOWNLOAD_DIR/$blob_name" \
+        --auth-mode login \
+        --overwrite
+done
 
 echo ""
 echo "Files in download directory:"
 ls -lR "$DOWNLOAD_DIR"
-
 
 ```
