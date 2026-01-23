@@ -46,6 +46,14 @@ echo "$blob_json" | jq -r '.[] | .name' | while read -r blob_name; do
 done
 
 echo ""
+echo "Extracting downloaded archive files..."
+# Find tar archives and extract them into the download directory
+find "$DOWNLOAD_DIR" -maxdepth 1 -type f \( -iname "*.tar" -o -iname "*.tar.gz" -o -iname "*.tgz" \) -print0 | while IFS= read -r -d '' archive; do
+    echo "Extracting: $archive"
+    tar -xvf "$archive" -C "$DOWNLOAD_DIR"
+done
+
+echo ""
 echo "Files in download directory:"
 ls -lR "$DOWNLOAD_DIR"
 
