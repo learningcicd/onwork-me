@@ -13,71 +13,117 @@ else
 fi
 
 # Validate required environment variables
-if [ -z "$GITLAB_TOKEN" ]; then
-    echo "Error: GITLAB_TOKEN not set in .env file"
+if [ -z "$AZURE_STORAGE_ACCOUNT" ]; then
+    echo "Error: AZURE_STORAGE_ACCOUNT not set in .env file"
     exit 1
 fi
 
-if [ -z "$GITLAB_PROJECT_ID" ]; then
-    echo "Error: GITLAB_PROJECT_ID not set in .env file"
+if [ -z "$AZURE_STORAGE_CONTAINER" ]; then
+    echo "Error: AZURE_STORAGE_CONTAINER not set in .env file"
     exit 1
 fi
 
-if [ -z "$GITLAB_URL" ]; then
-    GITLAB_URL="https://gitlab.com"
+# Validate Service Principal credentials
+if [ -z "$AZURE_CLIENT_ID" ]; then
+    echo "Error: AZURE_CLIENT_ID not set in .env file"
+    exit 1
 fi
 
-if [ -z "$GITLAB_BRANCH" ]; then
-    GITLAB_BRANCH="main"
+if [ -z "$AZURE_CLIENT_SECRET" ]; then
+    echo "Error: AZURE_CLIENT_SECRET not set in .env file"
+    exit 1
 fi
+
+if [ -z "$AZURE_TENANT_ID" ]; then
+    echo "Error: AZURE_TENANT_ID not set in .env file"
+    exit 1
+fi
+
+# Check if Azure CLI is installed
+if ! command -v az &> /dev/null; then
+    echo "Error: Azure CLI is not installed"
+    echo "Please install Azure CLI: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+    exit 1
+fi
+
+# Set blob path prefix if provided
+BLOB_PATH_PREFIX="${AZURE_BLOB_PATH_PREFIX:-}"
+
+# Login with Service Principal
+echo "Authenticating with Azure Service Principal..."
+az login --service-principal \
+    --username "$AZURE_CLIENT_ID" \
+    --password "$AZURE_CLIENT_SECRET" \
+    --tenant "$AZURE_TENANT_ID" \
+    --output none
+
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to authenticate with Azure Service Principal"
+    exit 1
+fi
+
+echo "Successfully authenticated with Azure"
+
+# Function to download file from Azure Blob Storage
+download_blob() {
+    local blob_name=$1
+    local output_file=$2
+    
+    echo "Downloading ${blob_name}..."
+    
+    az storage blob download \
+        --account-name "$AZURE_STORAGE_ACCOUNT" \
+        --container-name "$AZURE_STORAGE_CONTAINER" \
+        --name "${BLOB_PATH_PREFIX}${blob_name}" \
+        --file "$output_file" \
+        --auth-mode login \
+        --no-progress
+    
+    if [ $? -ne 0 ] || [ ! -f "$output_file" ]; then
+        echo "Error: Failed to download ${blob_name}"
+        exit 1
+    fi
+}
 
 # Create .ssh directory if it doesn't exist
 SSH_DIR="/home/oracle/.ssh"
 sudo mkdir -p "$SSH_DIR"
 
 # Download my_azure_key
-echo "Downloading my_azure_key..."
-curl -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-    "${GITLAB_URL}/api/v4/projects/${GITLAB_PROJECT_ID}/repository/files/my_azure_key/raw?ref=${GITLAB_BRANCH}" \
-    -o /tmp/my_azure_key
+download_blob "my_azure_key" "/tmp/my_azure_key"
 
-if [ ! -f /tmp/my_azure_key ]; then
-    echo "Error: Failed to download my_azure_key"
-    exit 1
-fi
+# Download authorized_key
+download_blob "authorized_key" "/tmp/authorized_key"
 
-# Download my_azure_key.pub
-echo "Downloading my_azure_key.pub..."
-curl -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-    "${GITLAB_URL}/api/v4/projects/${GITLAB_PROJECT_ID}/repository/files/my_azure_key.pub/raw?ref=${GITLAB_BRANCH}" \
-    -o /tmp/my_azure_key.pub
-
-if [ ! -f /tmp/my_azure_key.pub ]; then
-    echo "Error: Failed to download my_azure_key.pub"
-    exit 1
-fi
-
-# Copy files to destination with appropriate names
+# Copy files to destination
 echo "Copying files to $SSH_DIR..."
 sudo cp /tmp/my_azure_key "$SSH_DIR/my_azure_key"
-sudo cp /tmp/my_azure_key.pub "$SSH_DIR/authorized_keys"
+sudo cp /tmp/authorized_key "$SSH_DIR/authorized_key"
 
 # Set ownership
 echo "Setting ownership to oracle:oracle..."
 sudo chown oracle:oracle "$SSH_DIR/my_azure_key"
-sudo chown oracle:oracle "$SSH_DIR/authorized_keys"
+sudo chown oracle:oracle "$SSH_DIR/authorized_key"
 
 # Set permissions
 echo "Setting permissions..."
-sudo chmod 400 "$SSH_DIR/my_azure_key"       # -r--------
-sudo chmod 644 "$SSH_DIR/authorized_keys"     # -rw-r--r--
+sudo chmod 400 "$SSH_DIR/my_azure_key"      # -r--------
+sudo chmod 644 "$SSH_DIR/authorized_key"    # -rw-r--r--
+
+# Set ownership and permissions for .ssh directory
+sudo chown oracle:oracle "$SSH_DIR"
+sudo chmod 700 "$SSH_DIR"
 
 # Clean up temporary files
-rm -f /tmp/my_azure_key /tmp/my_azure_key.pub
+rm -f /tmp/my_azure_key /tmp/authorized_key
+
+# Logout from Azure
+echo "Logging out from Azure..."
+az logout --output none
 
 echo "SSH keys successfully configured!"
 echo "Private key: $SSH_DIR/my_azure_key (400)"
-echo "Authorized keys: $SSH_DIR/authorized_keys (644)"
+echo "Authorized key: $SSH_DIR/authorized_key (644)""
 
 ```
 
