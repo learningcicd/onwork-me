@@ -4,13 +4,34 @@
 #!/bin/bash
 set -e
 
-# Source environment variables from .env file
-if [ -f ".env" ]; then
-    source .env
+# Determine the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Look for .env file (prioritize /tmp for Packer)
+if [ -f "/tmp/.env" ]; then
+    # Packer provisioner location
+    ENV_FILE="/tmp/.env"
+elif [ -n "$ENV_FILE_PATH" ] && [ -f "$ENV_FILE_PATH" ]; then
+    # Use explicitly provided path
+    ENV_FILE="$ENV_FILE_PATH"
+elif [ -f ".env" ]; then
+    # Current working directory
+    ENV_FILE=".env"
+elif [ -f "$SCRIPT_DIR/.env" ]; then
+    # Same directory as script
+    ENV_FILE="$SCRIPT_DIR/.env"
 else
     echo "Error: .env file not found"
+    echo "Searched locations:"
+    echo "  - /tmp/.env (Packer default)"
+    echo "  - ENV_FILE_PATH environment variable"
+    echo "  - Current directory: $(pwd)/.env"
+    echo "  - Script directory: $SCRIPT_DIR/.env"
     exit 1
 fi
+
+echo "Using .env file: $ENV_FILE"
+source "$ENV_FILE"
 
 # Validate required environment variables
 if [ -z "$AZURE_STORAGE_ACCOUNT" ]; then
@@ -123,7 +144,7 @@ az logout --output none
 
 echo "SSH keys successfully configured!"
 echo "Private key: $SSH_DIR/my_azure_key (400)"
-echo "Authorized key: $SSH_DIR/authorized_key (644)""
+echo "Authorized key: $SSH_DIR/authorized_key (644)"
 
 ```
 
