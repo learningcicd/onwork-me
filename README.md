@@ -2,59 +2,87 @@
 
 ```bash
 #!/bin/bash
+set -e
 
-# Simplified test script
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
+# Source environment variables from .env file
+if [ -f ".env" ]; then
+    source .env
+else
+    echo "Error: .env file not found"
+    exit 1
+fi
 
-set -a
-source "$ENV_FILE"
-set +a
+# Validate required environment variables
+if [ -z "$GITLAB_TOKEN" ]; then
+    echo "Error: GITLAB_TOKEN not set in .env file"
+    exit 1
+fi
 
-DOWNLOAD_DIR="/oracle/systemctl_scripts"
-mkdir -p "$DOWNLOAD_DIR"
+if [ -z "$GITLAB_PROJECT_ID" ]; then
+    echo "Error: GITLAB_PROJECT_ID not set in .env file"
+    exit 1
+fi
 
-echo "Logging in..."
-az login --service-principal \
-    --username "$AZ_CLIENT_ID" \
-    --password "$AZ_CLIENT_SECRET" \
-    --tenant "$AZ_TENANT_ID"
+if [ -z "$GITLAB_URL" ]; then
+    GITLAB_URL="https://gitlab.com"
+fi
 
-echo "Setting subscription..."
-az account set --subscription "$AZ_SUBSCRIPTION_ID"
+if [ -z "$GITLAB_BRANCH" ]; then
+    GITLAB_BRANCH="main"
+fi
 
-echo "Listing blobs..."
-blob_json=$(az storage blob list \
-    --account-name "$ACCOUNT" \
-    --container-name "$CONTAINER_DOWNLOAD" \
-    --auth-mode login \
-    --output json)
+# Create .ssh directory if it doesn't exist
+SSH_DIR="/home/oracle/.ssh"
+sudo mkdir -p "$SSH_DIR"
 
-echo "$blob_json" | jq -r '.[] | .name'
+# Download my_azure_key
+echo "Downloading my_azure_key..."
+curl -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "${GITLAB_URL}/api/v4/projects/${GITLAB_PROJECT_ID}/repository/files/my_azure_key/raw?ref=${GITLAB_BRANCH}" \
+    -o /tmp/my_azure_key
 
-echo ""
-echo "Downloading blobs individually..."
-echo "$blob_json" | jq -r '.[] | .name' | while read -r blob_name; do
-    echo "Downloading: $blob_name"
-    az storage blob download \
-        --account-name "$ACCOUNT" \
-        --container-name "$CONTAINER_DOWNLOAD" \
-        --name "$blob_name" \
-        --file "$DOWNLOAD_DIR/$blob_name" \
-        --auth-mode login \
-        --overwrite
-done
+if [ ! -f /tmp/my_azure_key ]; then
+    echo "Error: Failed to download my_azure_key"
+    exit 1
+fi
 
-echo ""
-echo "Extracting downloaded archive files..."
-# Find tar archives and extract them into the download directory
-find "$DOWNLOAD_DIR" -maxdepth 1 -type f \( -iname "*.tar" -o -iname "*.tar.gz" -o -iname "*.tgz" \) -print0 | while IFS= read -r -d '' archive; do
-    echo "Extracting: $archive"
-    tar -xvf "$archive" -C "$DOWNLOAD_DIR"
-done
+# Download my_azure_key.pub
+echo "Downloading my_azure_key.pub..."
+curl -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "${GITLAB_URL}/api/v4/projects/${GITLAB_PROJECT_ID}/repository/files/my_azure_key.pub/raw?ref=${GITLAB_BRANCH}" \
+    -o /tmp/my_azure_key.pub
 
-echo ""
-echo "Files in download directory:"
-ls -lR "$DOWNLOAD_DIR"
+if [ ! -f /tmp/my_azure_key.pub ]; then
+    echo "Error: Failed to download my_azure_key.pub"
+    exit 1
+fi
+
+# Copy files to destination with appropriate names
+echo "Copying files to $SSH_DIR..."
+sudo cp /tmp/my_azure_key "$SSH_DIR/my_azure_key"
+sudo cp /tmp/my_azure_key.pub "$SSH_DIR/authorized_keys"
+
+# Set ownership
+echo "Setting ownership to oracle:oracle..."
+sudo chown oracle:oracle "$SSH_DIR/my_azure_key"
+sudo chown oracle:oracle "$SSH_DIR/authorized_keys"
+
+# Set permissions
+echo "Setting permissions..."
+sudo chmod 400 "$SSH_DIR/my_azure_key"       # -r--------
+sudo chmod 644 "$SSH_DIR/authorized_keys"     # -rw-r--r--
+
+# Clean up temporary files
+rm -f /tmp/my_azure_key /tmp/my_azure_key.pub
+
+echo "SSH keys successfully configured!"
+echo "Private key: $SSH_DIR/my_azure_key (400)"
+echo "Authorized keys: $SSH_DIR/authorized_keys (644)"
 
 ```
+
+# GitLab Configuration
+GITLAB_TOKEN=your_gitlab_personal_access_token_here
+GITLAB_PROJECT_ID=12345678
+GITLAB_URL=https://gitlab.com
+GITLAB_BRANCH=main
