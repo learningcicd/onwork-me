@@ -306,7 +306,15 @@ main
 ```
 
 # GitLab Configuration
-GITLAB_TOKEN=your_gitlab_personal_access_token_here
-GITLAB_PROJECT_ID=12345678
-GITLAB_URL=https://gitlab.com
-GITLAB_BRANCH=main
+# Azure Configuration
+RESOURCE_GROUP=""
+VMSS_NAMES=("A" "B")
+DELAY_BETWEEN_RESTARTS=30
+
+# Authentication Method: "interactive" or "service-principal"
+AUTH_METHOD="service-principal"
+
+# Azure Service Principal Credentials (required for service-principal auth)
+AZURE_CLIENT_ID=""
+AZURE_CLIENT_SECRET=""
+AZURE_TENANT_ID=""
