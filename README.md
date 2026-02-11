@@ -20,14 +20,11 @@ else
     echo "Please create a .env file with your Azure credentials."
 fi
 
-# Configuration
-RESOURCE_GROUP="${RESOURCE_GROUP:-your-resource-group}"
-# Set defaults if not defined in .env
-if [ -z "${VMSS_NAMES+x}" ]; then
-    VMSS_NAMES=("A" "B" "C")
-fi
-DELAY_BETWEEN_RESTARTS="${DELAY_BETWEEN_RESTARTS:-30}"  # seconds to wait between restarting nodes
-MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"  # max wait for instance to be running
+# Configuration (must be provided in .env or environment)
+RESOURCE_GROUP="${RESOURCE_GROUP:-}"
+VMSS_NAMES="${VMSS_NAMES:-}"
+DELAY_BETWEEN_RESTARTS="${DELAY_BETWEEN_RESTARTS:-}"
+MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-}"
 
 # Azure Service Principal Configuration (optional)
 # Set these in .env file or as environment variables:
@@ -259,6 +256,14 @@ restart_vmss() {
 # Main script
 main() {
     log_info "Azure VMSS Sequential Restart Script"
+
+    if [ -z "$RESOURCE_GROUP" ] || [ -z "$VMSS_NAMES" ] || [ -z "$DELAY_BETWEEN_RESTARTS" ] || [ -z "$MAX_WAIT_SECONDS" ]; then
+        log_error "Missing required configuration. Please set RESOURCE_GROUP, VMSS_NAMES, DELAY_BETWEEN_RESTARTS, and MAX_WAIT_SECONDS in .env."
+        exit 1
+    fi
+
+    read -r -a VMSS_NAMES <<< "$VMSS_NAMES"
+
     log_info "Resource Group: $RESOURCE_GROUP"
     log_info "VMSSs to restart: ${VMSS_NAMES[@]}"
     
