@@ -2,149 +2,306 @@
 
 ```bash
 #!/bin/bash
+
+# Script to restart Azure VMSS sequentially (A -> B -> C)
+# Each VMSS restarts 1 node at a time
+
 set -e
 
-# Determine the directory where the script is located
+# Get the directory where the script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Look for .env file (prioritize /tmp for Packer)
-if [ -f "/tmp/.env" ]; then
-    # Packer provisioner location
-    ENV_FILE="/tmp/.env"
-elif [ -n "$ENV_FILE_PATH" ] && [ -f "$ENV_FILE_PATH" ]; then
-    # Use explicitly provided path
-    ENV_FILE="$ENV_FILE_PATH"
-elif [ -f ".env" ]; then
-    # Current working directory
-    ENV_FILE=".env"
-elif [ -f "$SCRIPT_DIR/.env" ]; then
-    # Same directory as script
-    ENV_FILE="$SCRIPT_DIR/.env"
+# Load environment variables from .env file if it exists
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    # Source .env file, but don't fail if it doesn't exist
+    source "$SCRIPT_DIR/.env"
 else
-    echo "Error: .env file not found"
-    echo "Searched locations:"
-    echo "  - /tmp/.env (Packer default)"
-    echo "  - ENV_FILE_PATH environment variable"
-    echo "  - Current directory: $(pwd)/.env"
-    echo "  - Script directory: $SCRIPT_DIR/.env"
-    exit 1
+    echo "Warning: .env file not found at $SCRIPT_DIR/.env"
+    echo "Please create a .env file with your Azure credentials."
 fi
 
-echo "Using .env file: $ENV_FILE"
-source "$ENV_FILE"
-
-# Validate required environment variables
-if [ -z "$AZURE_STORAGE_ACCOUNT" ]; then
-    echo "Error: AZURE_STORAGE_ACCOUNT not set in .env file"
-    exit 1
+# Configuration
+RESOURCE_GROUP="${RESOURCE_GROUP:-your-resource-group}"
+# Set defaults if not defined in .env
+if [ -z "${VMSS_NAMES+x}" ]; then
+    VMSS_NAMES=("A" "B" "C")
 fi
+DELAY_BETWEEN_RESTARTS="${DELAY_BETWEEN_RESTARTS:-30}"  # seconds to wait between restarting nodes
+MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"  # max wait for instance to be running
 
-if [ -z "$AZURE_STORAGE_CONTAINER" ]; then
-    echo "Error: AZURE_STORAGE_CONTAINER not set in .env file"
-    exit 1
-fi
+# Azure Service Principal Configuration (optional)
+# Set these in .env file or as environment variables:
+# AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
+AZURE_CLIENT_ID="${AZURE_CLIENT_ID:-}"
+AZURE_CLIENT_SECRET="${AZURE_CLIENT_SECRET:-}"
+AZURE_TENANT_ID="${AZURE_TENANT_ID:-}"
+AUTH_METHOD="${AUTH_METHOD:-interactive}"  # "interactive" or "service-principal"
 
-# Validate Service Principal credentials
-if [ -z "$AZURE_CLIENT_ID" ]; then
-    echo "Error: AZURE_CLIENT_ID not set in .env file"
-    exit 1
-fi
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-if [ -z "$AZURE_CLIENT_SECRET" ]; then
-    echo "Error: AZURE_CLIENT_SECRET not set in .env file"
-    exit 1
-fi
+# Function to print colored output
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
 
-if [ -z "$AZURE_TENANT_ID" ]; then
-    echo "Error: AZURE_TENANT_ID not set in .env file"
-    exit 1
-fi
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-# Check if Azure CLI is installed
-if ! command -v az &> /dev/null; then
-    echo "Error: Azure CLI is not installed"
-    echo "Please install Azure CLI: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
-    exit 1
-fi
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
 
-# Set blob path prefix if provided
-BLOB_PATH_PREFIX="${AZURE_BLOB_PATH_PREFIX:-}"
+# Function to check if Azure CLI is installed
+check_az_cli() {
+    if ! command -v az &> /dev/null; then
+        log_error "Azure CLI is not installed. Please install it first."
+        exit 1
+    fi
+    log_info "Azure CLI is installed."
+}
 
-# Login with Service Principal
-echo "Authenticating with Azure Service Principal..."
-az login --service-principal \
-    --username "$AZURE_CLIENT_ID" \
-    --password "$AZURE_CLIENT_SECRET" \
-    --tenant "$AZURE_TENANT_ID" \
-    --output none
-
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to authenticate with Azure Service Principal"
-    exit 1
-fi
-
-echo "Successfully authenticated with Azure"
-
-# Function to download file from Azure Blob Storage
-download_blob() {
-    local blob_name=$1
-    local output_file=$2
+# Function to authenticate with Azure using Service Principal
+authenticate_service_principal() {
+    log_info "Authenticating with Azure using Service Principal..."
     
-    echo "Downloading ${blob_name}..."
+    if [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ] || [ -z "$AZURE_TENANT_ID" ]; then
+        log_error "Service principal credentials are incomplete."
+        log_error "Please set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID environment variables."
+        return 1
+    fi
     
-    az storage blob download \
-        --account-name "$AZURE_STORAGE_ACCOUNT" \
-        --container-name "$AZURE_STORAGE_CONTAINER" \
-        --name "${BLOB_PATH_PREFIX}${blob_name}" \
-        --file "$output_file" \
-        --auth-mode login \
-        --no-progress
+    if az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" &> /dev/null; then
+        log_info "Successfully authenticated with Service Principal"
+        return 0
+    else
+        log_error "Failed to authenticate with Service Principal"
+        return 1
+    fi
+}
+
+# Function to authenticate with Azure (interactive or service principal)
+authenticate_azure() {
+    if [ "$AUTH_METHOD" == "service-principal" ]; then
+        if ! authenticate_service_principal; then
+            return 1
+        fi
+    else
+        log_info "Authenticating with Azure interactively..."
+        if ! az login &> /dev/null; then
+            log_error "Failed to authenticate. Please run 'az login' manually."
+            return 1
+        fi
+        log_info "Successfully authenticated interactively"
+    fi
     
-    if [ $? -ne 0 ] || [ ! -f "$output_file" ]; then
-        echo "Error: Failed to download ${blob_name}"
+    # Verify authentication
+    if ! az account show &> /dev/null; then
+        log_error "Failed to verify Azure authentication"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to validate VMSS exists
+validate_vmss() {
+    local vmss_name=$1
+    if ! az vmss show --name "$vmss_name" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
+        log_error "VMSS '$vmss_name' not found in resource group '$RESOURCE_GROUP'"
+        return 1
+    fi
+    return 0
+}
+
+# Function to get instance IDs for a VMSS
+get_instance_records() {
+    local vmss_name=$1
+    local instances=$(az vmss list-instances --name "$vmss_name" --resource-group "$RESOURCE_GROUP" --query "[].{id:instanceId,name:name}" -o tsv)
+    echo "$instances"
+}
+
+# Function to restart a single instance
+restart_instance() {
+    local vmss_name=$1
+    local instance_id=$2
+    local instance_name=$3
+
+    if [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+        log_info "Restarting instance $instance_id in VMSS '$vmss_name'..."
+
+        if az vmss restart --name "$vmss_name" --instance-ids "$instance_id" --resource-group "$RESOURCE_GROUP"; then
+            log_info "Successfully restarted instance $instance_id"
+            return 0
+        fi
+        log_error "Failed to restart instance $instance_id"
+        return 1
+    fi
+
+    log_info "Restarting instance $instance_name (flexible) in VMSS '$vmss_name'..."
+
+    if az vm restart --name "$instance_name" --resource-group "$RESOURCE_GROUP"; then
+        log_info "Successfully restarted instance $instance_name"
+        return 0
+    fi
+
+    log_error "Failed to restart instance $instance_name"
+    return 1
+}
+
+# Function to wait for instance to be running
+wait_for_instance() {
+    local vmss_name=$1
+    local instance_id=$2
+    local instance_name=$3
+    local max_wait=$MAX_WAIT_SECONDS
+    local elapsed=0
+
+    local label="$instance_id"
+    if ! [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+        label="$instance_name"
+    fi
+
+    log_info "Waiting for instance $label to be running..."
+
+    while [ $elapsed -lt $max_wait ]; do
+        local state=""
+        local prov=""
+
+        if [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+            state=$(az vmss get-instance-view --name "$vmss_name" --resource-group "$RESOURCE_GROUP" --instance-id "$instance_id" --query "statuses[?starts_with(code, 'PowerState/')].code | [0]" -o tsv)
+            prov=$(az vmss get-instance-view --name "$vmss_name" --resource-group "$RESOURCE_GROUP" --instance-id "$instance_id" --query "statuses[?starts_with(code, 'ProvisioningState/')].code | [0]" -o tsv)
+        else
+            state=$(az vm get-instance-view --name "$instance_name" --resource-group "$RESOURCE_GROUP" --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" -o tsv)
+            prov=$(az vm get-instance-view --name "$instance_name" --resource-group "$RESOURCE_GROUP" --query "instanceView.statuses[?starts_with(code, 'ProvisioningState/')].code | [0]" -o tsv)
+        fi
+
+        if [ -n "$state" ] || [ -n "$prov" ]; then
+            log_info "Current state: power=$state provisioning=$prov"
+            if [ "$state" = "PowerState/running" ]; then
+                log_info "Instance $label is running"
+                return 0
+            fi
+        else
+            log_warning "Power state not available yet for instance $label"
+        fi
+
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+
+    log_warning "Instance $label did not reach running state within timeout period"
+    return 1
+}
+
+# Function to restart a single VMSS (one instance at a time)
+restart_vmss() {
+    local vmss_name=$1
+    
+    log_info "========================================"
+    log_info "Starting restart of VMSS: $vmss_name"
+    log_info "========================================"
+    
+    # Validate VMSS exists
+    if ! validate_vmss "$vmss_name"; then
+        return 1
+    fi
+    
+    # Get all instance IDs
+    local instance_records=$(get_instance_records "$vmss_name")
+    
+    if [ -z "$instance_records" ]; then
+        log_error "No instances found in VMSS '$vmss_name'"
+        return 1
+    fi
+    
+    # Count instances
+    local instance_count=$(echo "$instance_records" | wc -l)
+    log_info "Found $instance_count instances in VMSS '$vmss_name'"
+    
+    # Restart each instance one at a time
+    local instance_number=1
+    while read -r instance_id instance_name; do
+        local label="$instance_id"
+        if ! [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+            label="$instance_name"
+        fi
+
+        log_info "[Instance $instance_number/$instance_count] Processing instance: $label"
+
+        if restart_instance "$vmss_name" "$instance_id" "$instance_name"; then
+            # Wait for instance to be running before moving to next one
+            wait_for_instance "$vmss_name" "$instance_id" "$instance_name"
+            
+            # Add delay between restarts (except for the last instance)
+            if [ $instance_number -lt $instance_count ]; then
+                log_info "Waiting $DELAY_BETWEEN_RESTARTS seconds before restarting next instance..."
+                sleep $DELAY_BETWEEN_RESTARTS
+            fi
+        else
+            log_error "Failed to restart instance $label in VMSS '$vmss_name'. Aborting VMSS restart."
+            return 1
+        fi
+        
+        instance_number=$((instance_number + 1))
+    done <<< "$instance_records"
+    
+    log_info "========================================"
+    log_info "VMSS '$vmss_name' restart completed successfully"
+    log_info "========================================"
+    return 0
+}
+
+# Main script
+main() {
+    log_info "Azure VMSS Sequential Restart Script"
+    log_info "Resource Group: $RESOURCE_GROUP"
+    log_info "VMSSs to restart: ${VMSS_NAMES[@]}"
+    
+    # Validate prerequisites
+    check_az_cli
+    
+    # Authenticate with Azure
+    if ! authenticate_azure; then
+        exit 1
+    fi
+    
+    # Restart each VMSS sequentially
+    local failed_vmss=()
+    
+    for vmss_name in "${VMSS_NAMES[@]}"; do
+        if ! restart_vmss "$vmss_name"; then
+            failed_vmss+=("$vmss_name")
+        fi
+        
+        # Add delay between VMSS restarts (except for the last one)
+        if [ "$vmss_name" != "${VMSS_NAMES[-1]}" ]; then
+            log_info "Waiting 60 seconds before starting next VMSS restart..."
+            sleep 60
+        fi
+    done
+    
+    # Summary
+    log_info ""
+    log_info "========================================"
+    log_info "RESTART SUMMARY"
+    log_info "========================================"
+    
+    if [ ${#failed_vmss[@]} -eq 0 ]; then
+        log_info "All VMSSs restarted successfully!"
+        exit 0
+    else
+        log_error "The following VMSSs encountered errors: ${failed_vmss[@]}"
         exit 1
     fi
 }
 
-# Create .ssh directory if it doesn't exist
-SSH_DIR="/home/oracle/.ssh"
-sudo mkdir -p "$SSH_DIR"
-
-# Download my_azure_key
-download_blob "my_azure_key" "/tmp/my_azure_key"
-
-# Download authorized_key
-download_blob "authorized_key" "/tmp/authorized_key"
-
-# Copy files to destination
-echo "Copying files to $SSH_DIR..."
-sudo cp /tmp/my_azure_key "$SSH_DIR/my_azure_key"
-sudo cp /tmp/authorized_key "$SSH_DIR/authorized_key"
-
-# Set ownership
-echo "Setting ownership to oracle:oracle..."
-sudo chown oracle:oracle "$SSH_DIR/my_azure_key"
-sudo chown oracle:oracle "$SSH_DIR/authorized_key"
-
-# Set permissions
-echo "Setting permissions..."
-sudo chmod 400 "$SSH_DIR/my_azure_key"      # -r--------
-sudo chmod 644 "$SSH_DIR/authorized_key"    # -rw-r--r--
-
-# Set ownership and permissions for .ssh directory
-sudo chown oracle:oracle "$SSH_DIR"
-sudo chmod 700 "$SSH_DIR"
-
-# Clean up temporary files
-rm -f /tmp/my_azure_key /tmp/authorized_key
-
-# Logout from Azure
-echo "Logging out from Azure..."
-az logout --output none
-
-echo "SSH keys successfully configured!"
-echo "Private key: $SSH_DIR/my_azure_key (400)"
-echo "Authorized key: $SSH_DIR/authorized_key (644)"
+# Run main function
+main
 
 ```
 
