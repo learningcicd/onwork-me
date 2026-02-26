@@ -25,6 +25,8 @@ RESOURCE_GROUP="${RESOURCE_GROUP:-}"
 VMSS_NAMES="${VMSS_NAMES:-}"
 DELAY_BETWEEN_RESTARTS="${DELAY_BETWEEN_RESTARTS:-}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-}"
+VMSS_SERVICE_MAP_FILE="${VMSS_SERVICE_MAP_FILE:-$SCRIPT_DIR/vmss_svc.json}"
+HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-15}"
 
 # Azure Service Principal Configuration (optional)
 # Set these in .env file or as environment variables:
@@ -122,6 +124,206 @@ get_instance_records() {
     echo "$instances"
 }
 
+# Function to get mapped systemd service name for a VMSS from vmss_svc.json
+get_service_name_for_vmss() {
+    local vmss_name=$1
+
+    if [ ! -f "$VMSS_SERVICE_MAP_FILE" ]; then
+        log_warning "VMSS service map file not found: $VMSS_SERVICE_MAP_FILE"
+        echo ""
+        return 0
+    fi
+
+    local python_bin=""
+    if command -v python3 &> /dev/null; then
+        python_bin="python3"
+    elif command -v python &> /dev/null; then
+        python_bin="python"
+    else
+        log_error "Python is required to parse $VMSS_SERVICE_MAP_FILE but was not found"
+        return 1
+    fi
+
+    local service_name
+    service_name=$($python_bin - "$VMSS_SERVICE_MAP_FILE" "$vmss_name" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+target_vmss = sys.argv[2]
+
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+except Exception:
+    print("")
+    raise
+
+for item in payload.get("vmss_service_map", []):
+    if item.get("vmss_name") == target_vmss:
+        print(item.get("service_name", ""))
+        break
+else:
+    print("")
+PY
+)
+
+    echo "$service_name"
+}
+
+# Function to run systemctl action (stop/start) for mapped service on an instance
+run_service_command_on_instance() {
+    local vmss_name=$1
+    local instance_id=$2
+    local instance_name=$3
+    local service_name=$4
+    local action=$5
+
+    if [ -z "$service_name" ]; then
+        return 0
+    fi
+
+    if [ "$action" != "stop" ] && [ "$action" != "start" ]; then
+        log_error "Invalid service action: $action"
+        return 1
+    fi
+
+    log_info "Running 'systemctl $action ${service_name}.service' on instance..."
+
+    local command="systemctl $action ${service_name}.service"
+
+    if [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+        if az vmss run-command invoke \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$vmss_name" \
+            --instance-id "$instance_id" \
+            --command-id RunShellScript \
+            --scripts "$command" &> /dev/null; then
+            log_info "Successfully ran service $action on instance $instance_id"
+            return 0
+        fi
+
+        log_error "Failed to run service $action on instance $instance_id"
+        return 1
+    fi
+
+    if az vm run-command invoke \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$instance_name" \
+        --command-id RunShellScript \
+        --scripts "$command" &> /dev/null; then
+        log_info "Successfully ran service $action on instance $instance_name"
+        return 0
+    fi
+
+    log_error "Failed to run service $action on instance $instance_name"
+    return 1
+}
+
+# Function to wait until mapped service is active on an instance
+wait_for_service_active_on_instance() {
+    local vmss_name=$1
+    local instance_id=$2
+    local instance_name=$3
+    local service_name=$4
+    local max_wait=$MAX_WAIT_SECONDS
+    local elapsed=0
+
+    if [ -z "$service_name" ]; then
+        return 0
+    fi
+
+    local label="$instance_id"
+    if ! [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+        label="$instance_name"
+    fi
+
+    log_info "Waiting for ${service_name}.service to be active on instance $label..."
+
+    while [ $elapsed -lt $max_wait ]; do
+        local command="systemctl is-active --quiet ${service_name}.service"
+
+        if [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+            if az vmss run-command invoke \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$vmss_name" \
+                --instance-id "$instance_id" \
+                --command-id RunShellScript \
+                --scripts "$command" &> /dev/null; then
+                log_info "Service ${service_name}.service is active on instance $label"
+                return 0
+            fi
+        else
+            if az vm run-command invoke \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$instance_name" \
+                --command-id RunShellScript \
+                --scripts "$command" &> /dev/null; then
+                log_info "Service ${service_name}.service is active on instance $label"
+                return 0
+            fi
+        fi
+
+        sleep "$HEALTH_CHECK_INTERVAL_SECONDS"
+        elapsed=$((elapsed + HEALTH_CHECK_INTERVAL_SECONDS))
+    done
+
+    log_error "Service ${service_name}.service did not become active on instance $label within timeout"
+    return 1
+}
+
+# Function to wait for Azure instance health state to become healthy, if available
+wait_for_instance_health() {
+    local vmss_name=$1
+    local instance_id=$2
+    local instance_name=$3
+    local max_wait=$MAX_WAIT_SECONDS
+    local elapsed=0
+
+    local label="$instance_id"
+    if ! [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+        label="$instance_name"
+    fi
+
+    log_info "Waiting for instance $label health state to become healthy..."
+
+    while [ $elapsed -lt $max_wait ]; do
+        local health_state=""
+
+        if [[ "$instance_id" =~ ^[0-9]+$ ]]; then
+            health_state=$(az vmss get-instance-view \
+                --name "$vmss_name" \
+                --resource-group "$RESOURCE_GROUP" \
+                --instance-id "$instance_id" \
+                --query "statuses[?starts_with(code, 'HealthState/')].displayStatus | [0]" \
+                -o tsv 2> /dev/null || true)
+        else
+            health_state=$(az vm get-instance-view \
+                --name "$instance_name" \
+                --resource-group "$RESOURCE_GROUP" \
+                --query "instanceView.statuses[?starts_with(code, 'HealthState/')].displayStatus | [0]" \
+                -o tsv 2> /dev/null || true)
+        fi
+
+        if [ -z "$health_state" ] || [ "$health_state" = "None" ]; then
+            log_warning "HealthState not reported for instance $label; skipping health wait"
+            return 0
+        fi
+
+        log_info "Current health state for instance $label: $health_state"
+        if echo "$health_state" | grep -qi "healthy"; then
+            log_info "Instance $label reported healthy"
+            return 0
+        fi
+
+        sleep "$HEALTH_CHECK_INTERVAL_SECONDS"
+        elapsed=$((elapsed + HEALTH_CHECK_INTERVAL_SECONDS))
+    done
+
+    log_error "Instance $label did not reach healthy state within timeout"
+    return 1
+}
+
 # Function to restart a single instance
 restart_instance() {
     local vmss_name=$1
@@ -198,6 +400,7 @@ wait_for_instance() {
 # Function to restart a single VMSS (one instance at a time)
 restart_vmss() {
     local vmss_name=$1
+    local service_name=""
     
     log_info "========================================"
     log_info "Starting restart of VMSS: $vmss_name"
@@ -206,6 +409,13 @@ restart_vmss() {
     # Validate VMSS exists
     if ! validate_vmss "$vmss_name"; then
         return 1
+    fi
+
+    service_name=$(get_service_name_for_vmss "$vmss_name")
+    if [ -n "$service_name" ]; then
+        log_info "Mapped app service for VMSS '$vmss_name': ${service_name}.service"
+    else
+        log_warning "No mapped app service found for VMSS '$vmss_name'; proceeding without systemctl stop/start"
     fi
     
     # Get all instance IDs
@@ -230,9 +440,36 @@ restart_vmss() {
 
         log_info "[Instance $instance_number/$instance_count] Processing instance: $label"
 
+        if [ -n "$service_name" ]; then
+            if ! run_service_command_on_instance "$vmss_name" "$instance_id" "$instance_name" "$service_name" "stop"; then
+                log_error "Failed to gracefully stop ${service_name}.service before restart. Aborting VMSS restart."
+                return 1
+            fi
+        fi
+
         if restart_instance "$vmss_name" "$instance_id" "$instance_name"; then
             # Wait for instance to be running before moving to next one
-            wait_for_instance "$vmss_name" "$instance_id" "$instance_name"
+            if ! wait_for_instance "$vmss_name" "$instance_id" "$instance_name"; then
+                log_error "Instance $label failed to reach running state. Aborting VMSS restart."
+                return 1
+            fi
+
+            if [ -n "$service_name" ]; then
+                if ! run_service_command_on_instance "$vmss_name" "$instance_id" "$instance_name" "$service_name" "start"; then
+                    log_error "Failed to gracefully start ${service_name}.service after restart. Aborting VMSS restart."
+                    return 1
+                fi
+
+                if ! wait_for_service_active_on_instance "$vmss_name" "$instance_id" "$instance_name" "$service_name"; then
+                    log_error "Service ${service_name}.service did not become active after restart. Aborting VMSS restart."
+                    return 1
+                fi
+            fi
+
+            if ! wait_for_instance_health "$vmss_name" "$instance_id" "$instance_name"; then
+                log_error "Instance $label remained unhealthy after restart. Aborting VMSS restart."
+                return 1
+            fi
             
             # Add delay between restarts (except for the last instance)
             if [ $instance_number -lt $instance_count ]; then
@@ -308,8 +545,12 @@ main() {
 # Run main function
 main
 
+
 ```
 
+## ENV
+
+```
 # GitLab Configuration
 # Azure Configuration
 RESOURCE_GROUP=""
@@ -323,3 +564,16 @@ AUTH_METHOD="service-principal"
 AZURE_CLIENT_ID=""
 AZURE_CLIENT_SECRET=""
 AZURE_TENANT_ID=""
+```
+
+## vmss
+```
+{
+	"vmss_service_map": [
+		{
+			"vmss_name": "swldjmss",
+			"service_name": "commpjms"
+		}
+	]
+}
+```
