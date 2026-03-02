@@ -577,3 +577,181 @@ AZURE_TENANT_ID=""
 	]
 }
 ```
+
+## Restart SVC
+
+```
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+
+usage() {
+	cat <<EOF
+Usage: $0 [-o <output-file>]
+
+Reads RESOURCE_GROUP and VMSS_NAMES from .env in the same directory as this script.
+
+Fetches VMs in all configured VMSSes and outputs JSON grouped by zone.
+
+Output format:
+[
+	{
+		"vmss_name": "<vmss-name>",
+		"zone": "<zone>",
+		"vms": ["<vm-name-1>", "<vm-name-2>"]
+	}
+]
+
+Options:
+	-o   Output file path (optional). If omitted, prints to stdout.
+	-h   Show this help message
+EOF
+}
+
+OUTPUT_FILE=""
+
+while getopts ":o:h" opt; do
+	case "$opt" in
+		o) OUTPUT_FILE="$OPTARG" ;;
+		h)
+			usage
+			exit 0
+			;;
+		:)
+			echo "Error: Option -$OPTARG requires an argument." >&2
+			usage
+			exit 1
+			;;
+		\?)
+			echo "Error: Invalid option -$OPTARG" >&2
+			usage
+			exit 1
+			;;
+	esac
+done
+
+if [[ ! -f "$ENV_FILE" ]]; then
+	echo "Error: .env file not found at $ENV_FILE" >&2
+	exit 1
+fi
+
+source "$ENV_FILE"
+
+RESOURCE_GROUP="${RESOURCE_GROUP:-}"
+
+if [[ -z "$RESOURCE_GROUP" ]]; then
+	echo "Error: RESOURCE_GROUP is missing in .env" >&2
+	exit 1
+fi
+
+if ! command -v az >/dev/null 2>&1; then
+	echo "Error: Azure CLI 'az' is not installed or not in PATH." >&2
+	exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+	echo "Error: Python is required but was not found in PATH." >&2
+	exit 1
+fi
+
+if ! az account show >/dev/null 2>&1; then
+	echo "Error: Azure CLI is not authenticated. Run 'az login' first." >&2
+	exit 1
+fi
+
+VMSS_LIST=()
+if declare -p VMSS_NAMES >/dev/null 2>&1 && declare -p VMSS_NAMES 2>/dev/null | grep -q "declare -a"; then
+	VMSS_LIST=("${VMSS_NAMES[@]}")
+else
+	VMSS_NAMES_STRING="${VMSS_NAMES:-}"
+	VMSS_NAMES_STRING="${VMSS_NAMES_STRING//,/ }"
+	read -r -a VMSS_LIST <<< "$VMSS_NAMES_STRING"
+fi
+
+FILTERED_VMSS_LIST=()
+for vmss in "${VMSS_LIST[@]}"; do
+	if [[ -n "$vmss" ]]; then
+		FILTERED_VMSS_LIST+=("$vmss")
+	fi
+done
+
+if [[ ${#FILTERED_VMSS_LIST[@]} -eq 0 ]]; then
+	echo "Error: VMSS_NAMES is empty in .env" >&2
+	exit 1
+fi
+
+PYTHON_BIN="python3"
+if ! command -v python3 >/dev/null 2>&1; then
+	PYTHON_BIN="python"
+fi
+
+TMP_ROWS_FILE=$(mktemp)
+trap 'rm -f "$TMP_ROWS_FILE"' EXIT
+
+for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
+	INSTANCE_TSV=$(az vmss list-instances \
+		--resource-group "$RESOURCE_GROUP" \
+		--name "$vmss_name" \
+		--query "[].{vm_name:name, zone:zones[0]}" \
+		-o tsv)
+
+	if [[ -z "$INSTANCE_TSV" ]]; then
+		continue
+	fi
+
+	while IFS=$'\t' read -r vm_name zone; do
+		if [[ -z "$vm_name" ]]; then
+			continue
+		fi
+
+		if [[ -z "$zone" ]]; then
+			zone="no-zone"
+		fi
+
+		printf '%s\t%s\t%s\n' "$vmss_name" "$zone" "$vm_name" >> "$TMP_ROWS_FILE"
+	done <<< "$INSTANCE_TSV"
+done
+
+RESULT_JSON=$($PYTHON_BIN - "$TMP_ROWS_FILE" <<'PY'
+import json
+import sys
+from collections import defaultdict
+
+rows_file = sys.argv[1]
+
+grouped = defaultdict(lambda: defaultdict(list))
+
+with open(rows_file, "r", encoding="utf-8") as fh:
+		for line in fh:
+				line = line.rstrip("\n")
+				if not line:
+						continue
+				vmss_name, zone, vm_name = line.split("\t", 2)
+				grouped[vmss_name][zone].append(vm_name)
+
+output = []
+for vmss_name in sorted(grouped.keys()):
+		zones = grouped[vmss_name]
+		for zone in sorted(zones.keys(), key=lambda value: (value == "no-zone", value)):
+				output.append(
+						{
+								"vmss_name": vmss_name,
+								"zone": zone,
+								"vms": sorted(zones[zone]),
+						}
+				)
+
+print(json.dumps(output, indent=2))
+PY
+)
+
+if [[ -n "$OUTPUT_FILE" ]]; then
+	printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
+	echo "JSON written to $OUTPUT_FILE"
+else
+	printf '%s\n' "$RESULT_JSON"
+fi
+```
