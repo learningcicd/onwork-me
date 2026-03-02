@@ -587,12 +587,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
+VMSS_SERVICE_MAP_FILE="$SCRIPT_DIR/vmss_svc.json"
 
 usage() {
 	cat <<EOF
 Usage: $0 [-o <output-file>]
 
 Reads RESOURCE_GROUP and VMSS_NAMES from .env in the same directory as this script.
+Reads manual VMSS-to-service mapping from vmss_svc.json (if present).
 
 Fetches VMs in all configured VMSSes and outputs JSON grouped by zone.
 
@@ -600,18 +602,19 @@ Output format:
 [
 	{
 		"vmss_name": "<vmss-name>",
+		"service_name": "<service-name-or-empty>",
 		"zone": "<zone>",
 		"vms": ["<vm-name-1>", "<vm-name-2>"]
 	}
 ]
 
 Options:
-	-o   Output file path (optional). If omitted, prints to stdout.
+	-o   Output file path (optional). Default: ./vmss-svc-mapping.json
 	-h   Show this help message
 EOF
 }
 
-OUTPUT_FILE=""
+OUTPUT_FILE="$SCRIPT_DIR/vmss-svc-mapping.json"
 
 while getopts ":o:h" opt; do
 	case "$opt" in
@@ -724,14 +727,30 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 	done <<< "$INSTANCE_TSV"
 done
 
-RESULT_JSON=$($PYTHON_BIN - "$TMP_ROWS_FILE" <<'PY'
+RESULT_JSON=$($PYTHON_BIN - "$TMP_ROWS_FILE" "$VMSS_SERVICE_MAP_FILE" <<'PY'
 import json
 import sys
 from collections import defaultdict
 
 rows_file = sys.argv[1]
+service_map_file = sys.argv[2]
 
 grouped = defaultdict(lambda: defaultdict(list))
+service_name_map = {}
+
+try:
+	with open(service_map_file, "r", encoding="utf-8") as fh:
+		payload = json.load(fh)
+
+	for item in payload.get("vmss_service_map", []):
+		vmss = item.get("vmss_name")
+		service = item.get("service_name", "")
+		if vmss and vmss not in service_name_map:
+			service_name_map[vmss] = service
+except FileNotFoundError:
+	pass
+except Exception:
+	pass
 
 with open(rows_file, "r", encoding="utf-8") as fh:
 		for line in fh:
@@ -743,26 +762,7 @@ with open(rows_file, "r", encoding="utf-8") as fh:
 
 output = []
 for vmss_name in sorted(grouped.keys()):
-		zones = grouped[vmss_name]
-		for zone in sorted(zones.keys(), key=lambda value: (value == "no-zone", value)):
-				output.append(
-						{
-								"vmss_name": vmss_name,
-								"zone": zone,
-								"vms": sorted(zones[zone]),
-						}
-				)
-
-print(json.dumps(output, indent=2))
-PY
-)
-
-if [[ -n "$OUTPUT_FILE" ]]; then
-	printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
-	echo "JSON written to $OUTPUT_FILE"
-else
-	printf '%s\n' "$RESULT_JSON"
-fi
+		
 ```
 
 ```
