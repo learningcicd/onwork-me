@@ -764,3 +764,7 @@ else
 	printf '%s\n' "$RESULT_JSON"
 fi
 ```
+
+```
+bash -lc 'source ./.env; for vmss in "${VMSS_NAMES[@]}"; do az vmss list-instances -g "$RESOURCE_GROUP" -n "$vmss" --query "[].{vmss_name:'"$vmss"',zone:zones[0],vm_name:name}" -o json; done | python3 -c "import sys,json,collections; out=[]; d=collections.defaultdict(lambda: collections.defaultdict(list));\n[ d[i.get(\"vmss_name\")][str(i.get(\"zone\") or \"no-zone\")].append(i.get(\"vm_name\")) for arr in [json.loads(x) for x in sys.stdin.read().splitlines() if x.strip()] for i in arr if i.get(\"vm_name\") ];\n[ out.append({\"vmss_name\":v,\"zone\":z,\"vms\":sorted(n)}) for v in sorted(d) for z,n in sorted(d[v].items(), key=lambda kv:(kv[0]==\"no-zone\",kv[0])) ];\nprint(json.dumps(out,indent=2))"'
+```
