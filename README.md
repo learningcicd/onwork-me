@@ -762,6 +762,24 @@ with open(rows_file, "r", encoding="utf-8") as fh:
 
 output = []
 for vmss_name in sorted(grouped.keys()):
+		zones = grouped[vmss_name]
+		for zone in sorted(zones.keys(), key=lambda value: (value == "no-zone", value)):
+				output.append(
+						{
+								"vmss_name": vmss_name,
+								"service_name": service_name_map.get(vmss_name, ""),
+								"zone": zone,
+								"vms": sorted(zones[zone]),
+						}
+				)
+
+print(json.dumps(output, indent=2))
+PY
+)
+
+printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
+echo "JSON written to $OUTPUT_FILE"
+
 		
 ```
 
