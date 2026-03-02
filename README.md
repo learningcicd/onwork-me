@@ -692,11 +692,20 @@ TMP_ROWS_FILE=$(mktemp)
 trap 'rm -f "$TMP_ROWS_FILE"' EXIT
 
 for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
-	INSTANCE_TSV=$(az vmss list-instances \
+	if ! INSTANCE_TSV=$(az vmss list-instances \
 		--resource-group "$RESOURCE_GROUP" \
 		--name "$vmss_name" \
 		--query "[].{vm_name:name, zone:zones[0]}" \
-		-o tsv)
+		-o tsv 2>&1); then
+		if echo "$INSTANCE_TSV" | grep -qi "virtualmachineScaleset/virtualMachines"; then
+			echo "Error: Missing Azure RBAC permission 'Microsoft.Compute/virtualMachineScaleSets/virtualMachines/read' for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
+			echo "Grant Reader (or Virtual Machine Contributor/Contributor) on the VMSS or resource group and retry." >&2
+		else
+			echo "Error: Failed to fetch instances for VMSS '$vmss_name':" >&2
+			echo "$INSTANCE_TSV" >&2
+		fi
+		exit 1
+	fi
 
 	if [[ -z "$INSTANCE_TSV" ]]; then
 		continue
