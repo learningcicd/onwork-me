@@ -763,14 +763,19 @@ main
 RG="<RESOURCE_GROUP>"
 VMSS="<VMSS_NAME>"
 
-az vmss list-instances -g $RG -n $VMSS -o json | \
-jq -r '.[] | [.instanceId, .osProfile.computerName, (.zones[0] // "NA")] | @tsv' | \
-while IFS=$'\t' read instance computer zone
-do
-    ip=$(az vmss nic list -g $RG --vmss-name $VMSS \
-    --query "[?contains(virtualMachine.id, '/virtualMachines/$instance')].ipConfigurations[0].privateIpAddress" \
-    -o tsv)
+echo -e "VMSS\tInstanceID\tComputerName\tPrivateIP\tZone"
 
-    printf "%-10s %-15s %-15s %-5s\n" "$instance" "$computer" "$ip" "$zone"
+instances=$(az vmss list-instances -g $RG -n $VMSS -o json)
+nics=$(az vmss nic list -g $RG --vmss-name $VMSS -o json)
+
+echo "$instances" | jq -c '.[]' | while read vm
+do
+    instance=$(echo $vm | jq -r '.instanceId')
+    computer=$(echo $vm | jq -r '.osProfile.computerName')
+    zone=$(echo $vm | jq -r '.zones[0] // "NA"')
+
+    ip=$(echo "$nics" | jq -r ".[] | select(.virtualMachine.id | endswith(\"/$instance\")) | .ipConfigurations[0].privateIpAddress")
+
+    printf "%-10s %-10s %-15s %-15s %-5s\n" "$VMSS" "$instance" "$computer" "$ip" "$zone"
 done
 ```
