@@ -786,3 +786,257 @@ echo "JSON written to $OUTPUT_FILE"
 ```
 bash -lc 'source ./.env; for vmss in "${VMSS_NAMES[@]}"; do az vmss list-instances -g "$RESOURCE_GROUP" -n "$vmss" --query "[].{vmss_name:'"$vmss"',zone:zones[0],vm_name:name}" -o json; done | python3 -c "import sys,json,collections; out=[]; d=collections.defaultdict(lambda: collections.defaultdict(list));\n[ d[i.get(\"vmss_name\")][str(i.get(\"zone\") or \"no-zone\")].append(i.get(\"vm_name\")) for arr in [json.loads(x) for x in sys.stdin.read().splitlines() if x.strip()] for i in arr if i.get(\"vm_name\") ];\n[ out.append({\"vmss_name\":v,\"zone\":z,\"vms\":sorted(n)}) for v in sorted(d) for z,n in sorted(d[v].items(), key=lambda kv:(kv[0]==\"no-zone\",kv[0])) ];\nprint(json.dumps(out,indent=2))"'
 ```
+
+## TESTIN
+
+```
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+MAPPING_FILE="${VMSS_MAPPING_FILE:-$SCRIPT_DIR/vmss-svc-mapping.json}"
+DELAY_SECONDS=45
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log_info() {
+  echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warning() {
+  echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+  echo -e "${RED}[ERROR]${NC} $1"
+}
+
+require_command() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log_error "Required command not found: $cmd"
+    exit 1
+  fi
+}
+
+load_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    log_error ".env file not found at $ENV_FILE"
+    exit 1
+  fi
+
+  source "$ENV_FILE"
+
+  RESOURCE_GROUP="${RESOURCE_GROUP:-}"
+  SSH_USERNAME="${SSH_USERNAME:-}"
+  SSH_PASSWORD="${SSH_PASSWORD:-}"
+  AUTH_METHOD="${AUTH_METHOD:-interactive}"
+  AZURE_CLIENT_ID="${AZURE_CLIENT_ID:-}"
+  AZURE_CLIENT_SECRET="${AZURE_CLIENT_SECRET:-}"
+  AZURE_TENANT_ID="${AZURE_TENANT_ID:-}"
+
+  if [[ -z "$RESOURCE_GROUP" ]]; then
+    log_error "RESOURCE_GROUP is required in .env"
+    exit 1
+  fi
+
+  if [[ -z "$SSH_USERNAME" || -z "$SSH_PASSWORD" ]]; then
+    log_error "SSH_USERNAME and SSH_PASSWORD are required in .env"
+    exit 1
+  fi
+}
+
+authenticate_azure() {
+  if az account show >/dev/null 2>&1; then
+    log_info "Azure CLI is already authenticated."
+    return 0
+  fi
+
+  if [[ "$AUTH_METHOD" == "service-principal" ]]; then
+    if [[ -z "$AZURE_CLIENT_ID" || -z "$AZURE_CLIENT_SECRET" || -z "$AZURE_TENANT_ID" ]]; then
+      log_error "AUTH_METHOD=service-principal but AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/AZURE_TENANT_ID are missing."
+      exit 1
+    fi
+
+    log_info "Authenticating with Azure service principal..."
+    az login --service-principal \
+      --username "$AZURE_CLIENT_ID" \
+      --password "$AZURE_CLIENT_SECRET" \
+      --tenant "$AZURE_TENANT_ID" >/dev/null
+    return 0
+  fi
+
+  log_info "Authenticating with Azure interactively..."
+  az login >/dev/null
+}
+
+prompt_zone() {
+  local zone_input
+  read -r -p "Enter Azure zone number to process (e.g., 1, 2, 3): " zone_input
+
+  if [[ -z "$zone_input" ]]; then
+    log_error "Zone input cannot be empty."
+    exit 1
+  fi
+
+  SELECTED_ZONE="$zone_input"
+  log_info "Selected zone: $SELECTED_ZONE"
+}
+
+get_zone_rows() {
+  local python_bin="python3"
+  if ! command -v python3 >/dev/null 2>&1; then
+    python_bin="python"
+  fi
+
+  "$python_bin" - "$MAPPING_FILE" "$SELECTED_ZONE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+zone = str(sys.argv[2])
+
+with open(path, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+if not isinstance(payload, list):
+    raise SystemExit("Mapping file must contain a JSON array")
+
+for item in payload:
+    if str(item.get("zone", "")) != zone:
+        continue
+
+    vmss_name = item.get("vmss_name", "")
+    service_name = item.get("service_name", "")
+    vms = item.get("vms", [])
+
+    if not vmss_name or not service_name or not isinstance(vms, list):
+        continue
+
+    for vm_name in vms:
+        if vm_name:
+            print(f"{vmss_name}\t{service_name}\t{vm_name}")
+PY
+}
+
+resolve_vm_ip() {
+  local vm_name="$1"
+
+  local ip
+  ip=$(az vm show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$vm_name" \
+    --show-details \
+    --query "privateIps" \
+    -o tsv 2>/dev/null || true)
+
+  if [[ -n "$ip" && "$ip" != "null" ]]; then
+    echo "$ip"
+    return 0
+  fi
+
+  ip=$(az vm show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$vm_name" \
+    --show-details \
+    --query "publicIps" \
+    -o tsv 2>/dev/null || true)
+
+  if [[ -n "$ip" && "$ip" != "null" ]]; then
+    echo "$ip"
+    return 0
+  fi
+
+  echo ""
+}
+
+restart_service_over_ssh() {
+  local vm_name="$1"
+  local vmss_name="$2"
+  local service_name="$3"
+
+  local vm_ip
+  vm_ip="$(resolve_vm_ip "$vm_name")"
+
+  if [[ -z "$vm_ip" ]]; then
+    log_error "Could not resolve IP for VM '$vm_name' (VMSS '$vmss_name')."
+    return 1
+  fi
+
+  log_info "Restarting ${service_name}.service on VM '$vm_name' ($vm_ip), VMSS '$vmss_name'"
+
+  if sshpass -p "$SSH_PASSWORD" ssh \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=15 \
+      "$SSH_USERNAME@$vm_ip" \
+      "sudo systemctl restart ${service_name}.service && sudo systemctl is-active --quiet ${service_name}.service"; then
+    log_info "Service restart successful: $vm_name -> ${service_name}.service"
+    return 0
+  fi
+
+  log_error "Service restart failed on VM '$vm_name' for ${service_name}.service"
+  return 1
+}
+
+main() {
+  require_command az
+  require_command ssh
+  require_command sshpass
+
+  if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+    log_error "Python is required (python3 or python) to parse mapping file."
+    exit 1
+  fi
+
+  load_env
+
+  if [[ ! -f "$MAPPING_FILE" ]]; then
+    log_error "Mapping file not found: $MAPPING_FILE"
+    log_warning "Generate it first using restart-svc.sh (output: vmss-svc-mapping.json)."
+    exit 1
+  fi
+
+  authenticate_azure
+  prompt_zone
+
+  mapfile -t zone_rows < <(get_zone_rows)
+
+  if [[ ${#zone_rows[@]} -eq 0 ]]; then
+    log_warning "No VMs found in zone '$SELECTED_ZONE' with valid vmss_name/service_name in $MAPPING_FILE"
+    exit 0
+  fi
+
+  log_info "Found ${#zone_rows[@]} VM(s) to process in zone '$SELECTED_ZONE'."
+
+  local index=1
+  local total=${#zone_rows[@]}
+
+  for row in "${zone_rows[@]}"; do
+    IFS=$'\t' read -r vmss_name service_name vm_name <<< "$row"
+
+    log_info "[$index/$total] VMSS='$vmss_name' VM='$vm_name' Service='${service_name}.service'"
+
+    if ! restart_service_over_ssh "$vm_name" "$vmss_name" "$service_name"; then
+      log_error "Stopping due to failure on VM '$vm_name'."
+      exit 1
+    fi
+
+    if [[ $index -lt $total ]]; then
+      log_info "Waiting ${DELAY_SECONDS}s before next VM..."
+      sleep "$DELAY_SECONDS"
+    fi
+
+    index=$((index + 1))
+  done
+
+  log_info "Completed service restarts for zone '$SELECTED_ZONE'."
+}
+
+main
+```
