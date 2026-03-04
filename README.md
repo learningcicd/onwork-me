@@ -758,3 +758,11 @@ main() {
 
 main
 ```
+
+```
+az vmss nic list \
+  --resource-group <RESOURCE_GROUP> \
+  --vmss-name <VMSS_NAME> \
+  --query "[].{InstanceId:virtualMachine.id, ComputerName:virtualMachine.name, PrivateIP:ipConfigurations[0].privateIpAddress, Zone:zones[0]}" \
+  -o table
+```
