@@ -1,6 +1,7 @@
 ### build.pkr.hcl
 
 ```bash
+
 #!/bin/bash
 
 set -euo pipefail
@@ -120,6 +121,50 @@ fi
 TMP_ROWS_FILE=$(mktemp)
 trap 'rm -f "$TMP_ROWS_FILE"' EXIT
 
+get_vm_ip_for_instance() {
+	local vmss_name="$1"
+	local instance_id="$2"
+	local vm_name="$3"
+	local vm_ip=""
+
+	vm_ip=$(az vmss nic list-vm-nics \
+		--resource-group "$RESOURCE_GROUP" \
+		--vmss-name "$vmss_name" \
+		--instance-id "$instance_id" \
+		--query "[0].ipConfigurations[0].privateIpAddress" \
+		-o tsv 2>/dev/null || true)
+
+	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
+		vm_ip=$(az vmss nic list \
+			--resource-group "$RESOURCE_GROUP" \
+			--vmss-name "$vmss_name" \
+			--query "[?contains(virtualMachine.id, '/virtualMachines/$instance_id')].ipConfigurations[0].privateIpAddress | [0]" \
+			-o tsv 2>/dev/null || true)
+	fi
+
+	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
+		vm_ip=$(az vm list-ip-addresses \
+			--resource-group "$RESOURCE_GROUP" \
+			--name "$vm_name" \
+			--query "[0].virtualMachine.network.privateIpAddresses[0]" \
+			-o tsv 2>/dev/null || true)
+	fi
+
+	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
+		vm_ip=$(az vm list-ip-addresses \
+			--resource-group "$RESOURCE_GROUP" \
+			--name "$vm_name" \
+			--query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" \
+			-o tsv 2>/dev/null || true)
+	fi
+
+	if [[ "$vm_ip" == "null" ]]; then
+		vm_ip=""
+	fi
+
+	echo "$vm_ip"
+}
+
 for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 	if ! INSTANCE_TSV=$(az vmss list-instances \
 		--resource-group "$RESOURCE_GROUP" \
@@ -153,28 +198,10 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 			computer_name="$vm_name"
 		fi
 
-		vm_ip=$(az vmss nic list-vm-nics \
-			--resource-group "$RESOURCE_GROUP" \
-			--vmss-name "$vmss_name" \
-			--instance-id "$instance_id" \
-			--query "[0].ipConfigurations[0].privateIpAddress" \
-			-o tsv 2>/dev/null || true)
+		vm_ip=$(get_vm_ip_for_instance "$vmss_name" "$instance_id" "$vm_name")
 
-		if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
-			public_ip_id=$(az vmss nic list-vm-nics \
-				--resource-group "$RESOURCE_GROUP" \
-				--vmss-name "$vmss_name" \
-				--instance-id "$instance_id" \
-				--query "[0].ipConfigurations[0].publicIpAddress.id" \
-				-o tsv 2>/dev/null || true)
-
-			if [[ -n "$public_ip_id" && "$public_ip_id" != "null" ]]; then
-				vm_ip=$(az network public-ip show --ids "$public_ip_id" --query "ipAddress" -o tsv 2>/dev/null || true)
-			fi
-		fi
-
-		if [[ "$vm_ip" == "null" ]]; then
-			vm_ip=""
+		if [[ -z "$vm_ip" ]]; then
+			echo "Warning: IP lookup failed for VM '$vm_name' (instance '$instance_id', VMSS '$vmss_name')." >&2
 		fi
 
 		printf '%s\t%s\t%s\t%s\t%s\n' "$vmss_name" "$zone" "$vm_name" "$computer_name" "$vm_ip" >> "$TMP_ROWS_FILE"
@@ -243,8 +270,6 @@ PY
 
 printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
 echo "JSON written to $OUTPUT_FILE"
-
-
 
 
 ```
