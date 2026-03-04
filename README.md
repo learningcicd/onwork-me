@@ -122,47 +122,78 @@ TMP_ROWS_FILE=$(mktemp)
 trap 'rm -f "$TMP_ROWS_FILE"' EXIT
 
 for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
-	if ! INSTANCE_TSV=$(az vmss nic list \
+	if ! INSTANCES_JSON=$(az vmss list-instances \
 		--resource-group "$RESOURCE_GROUP" \
-		--vmss-name "$vmss_name" \
-		--query "[].[virtualMachine.id, virtualMachine.name, ipConfigurations[0].privateIpAddress, zones[0]]" \
-		-o tsv 2>&1); then
-		if echo "$INSTANCE_TSV" | grep -qi "virtualmachineScalesets/networkinterfaces\|virtualmachineScaleset/virtualMachines"; then
-			echo "Error: Missing Azure RBAC permission to read VMSS NICs for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
+		--name "$vmss_name" \
+		-o json 2>&1); then
+		if echo "$INSTANCES_JSON" | grep -qi "virtualmachineScaleset/virtualMachines"; then
+			echo "Error: Missing Azure RBAC permission to read VMSS instances for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
 			echo "Grant Reader (or Virtual Machine Contributor/Contributor) on the VMSS or resource group and retry." >&2
 		else
 			echo "Error: Failed to fetch instances for VMSS '$vmss_name':" >&2
-			echo "$INSTANCE_TSV" >&2
+			echo "$INSTANCES_JSON" >&2
 		fi
 		exit 1
 	fi
 
-	if [[ -z "$INSTANCE_TSV" ]]; then
+	if ! NICS_JSON=$(az vmss nic list \
+		--resource-group "$RESOURCE_GROUP" \
+		--vmss-name "$vmss_name" \
+		-o json 2>&1); then
+		if echo "$NICS_JSON" | grep -qi "virtualmachineScalesets/networkinterfaces\|virtualmachineScaleset/virtualMachines"; then
+			echo "Error: Missing Azure RBAC permission to read VMSS NICs for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
+			echo "Grant Reader (or Virtual Machine Contributor/Contributor) on the VMSS or resource group and retry." >&2
+		else
+			echo "Error: Failed to fetch NICs for VMSS '$vmss_name':" >&2
+			echo "$NICS_JSON" >&2
+		fi
+		exit 1
+	fi
+
+	if [[ -z "$INSTANCES_JSON" || "$INSTANCES_JSON" == "[]" ]]; then
 		continue
 	fi
 
-	while IFS=$'\t' read -r vm_resource_id computer_name vm_ip zone; do
-		if [[ -z "$computer_name" ]]; then
-			continue
-		fi
+	$PYTHON_BIN - "$vmss_name" "$INSTANCES_JSON" "$NICS_JSON" >> "$TMP_ROWS_FILE" <<'PY'
+import json
+import sys
 
-		if [[ -z "$zone" ]]; then
-			zone="no-zone"
-		fi
+vmss_name = sys.argv[1]
+instances_json = sys.argv[2]
+nics_json = sys.argv[3]
 
-		if [[ "$vm_ip" == "null" ]]; then
-			vm_ip=""
-		fi
+instances = json.loads(instances_json)
+nics = json.loads(nics_json)
 
-		vm_name="$computer_name"
-		instance_id="${vm_resource_id##*/}"
+ip_by_instance = {}
+for nic in nics:
+    vm_ref = (nic.get("virtualMachine") or {}).get("id", "")
+    if not vm_ref:
+        continue
+    instance_id = vm_ref.rstrip("/").split("/")[-1]
+    ip = ""
+    ip_configs = nic.get("ipConfigurations") or []
+    if ip_configs:
+        ip = ip_configs[0].get("privateIpAddress") or ""
+    if instance_id and ip:
+        ip_by_instance[instance_id] = ip
 
-		if [[ -z "$vm_ip" ]]; then
-			echo "Warning: IP lookup failed for VM '$vm_name' (computer_name '$computer_name', instance '$instance_id', VMSS '$vmss_name')." >&2
-		fi
+for item in instances:
+    instance_id = str(item.get("instanceId", ""))
+    vm_name = item.get("name") or ""
+    computer_name = ((item.get("osProfile") or {}).get("computerName")) or vm_name
+    zones = item.get("zones") or []
+    zone = str(zones[0]) if zones else "no-zone"
+    ip = ip_by_instance.get(instance_id, "")
 
-		printf '%s\t%s\t%s\t%s\t%s\n' "$vmss_name" "$zone" "$vm_name" "$computer_name" "$vm_ip" >> "$TMP_ROWS_FILE"
-	done <<< "$INSTANCE_TSV"
+	if not ip:
+		print(
+			f"Warning: IP lookup failed for VM '{vm_name}' (computer_name '{computer_name}', instance '{instance_id}', VMSS '{vmss_name}').",
+			file=sys.stderr,
+		)
+
+    print(f"{vmss_name}\t{zone}\t{vm_name}\t{computer_name}\t{ip}")
+PY
 done
 
 RESULT_JSON=$($PYTHON_BIN - "$TMP_ROWS_FILE" "$VMSS_SERVICE_MAP_FILE" <<'PY'
@@ -227,6 +258,7 @@ PY
 
 printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
 echo "JSON written to $OUTPUT_FILE"
+
 
 
 
