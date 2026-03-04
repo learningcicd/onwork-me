@@ -122,26 +122,26 @@ TMP_ROWS_FILE=$(mktemp)
 trap 'rm -f "$TMP_ROWS_FILE"' EXIT
 
 get_vm_ip_for_instance() {
-	local vmss_name="$1"
-	local instance_id="$2"
-	local vm_name="$3"
+	local vm_name="$1"
+	local computer_name="$2"
 	local vm_ip=""
+	local resolved_vm_name=""
 
-	vm_ip=$(az vmss nic list-vm-nics \
+	# 1) Resolve ARM VM name by computer name (hostname), then read private IP
+	resolved_vm_name=$(az vm list \
 		--resource-group "$RESOURCE_GROUP" \
-		--vmss-name "$vmss_name" \
-		--instance-id "$instance_id" \
-		--query "[0].ipConfigurations[0].privateIpAddress" \
+		--query "[?osProfile.computerName=='$computer_name'].name | [0]" \
 		-o tsv 2>/dev/null || true)
 
-	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
-		vm_ip=$(az vmss nic list \
+	if [[ -n "$resolved_vm_name" && "$resolved_vm_name" != "null" ]]; then
+		vm_ip=$(az vm list-ip-addresses \
 			--resource-group "$RESOURCE_GROUP" \
-			--vmss-name "$vmss_name" \
-			--query "[?contains(virtualMachine.id, '/virtualMachines/$instance_id')].ipConfigurations[0].privateIpAddress | [0]" \
+			--name "$resolved_vm_name" \
+			--query "[0].virtualMachine.network.privateIpAddresses[0]" \
 			-o tsv 2>/dev/null || true)
 	fi
 
+	# 2) Fallback: try with instance VM name
 	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
 		vm_ip=$(az vm list-ip-addresses \
 			--resource-group "$RESOURCE_GROUP" \
@@ -150,6 +150,18 @@ get_vm_ip_for_instance() {
 			-o tsv 2>/dev/null || true)
 	fi
 
+	# 3) Public IP fallback by computer-name-resolved VM
+	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
+		if [[ -n "$resolved_vm_name" && "$resolved_vm_name" != "null" ]]; then
+			vm_ip=$(az vm list-ip-addresses \
+				--resource-group "$RESOURCE_GROUP" \
+				--name "$resolved_vm_name" \
+				--query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" \
+				-o tsv 2>/dev/null || true)
+		fi
+	fi
+
+	# 4) Public IP fallback by instance VM name
 	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
 		vm_ip=$(az vm list-ip-addresses \
 			--resource-group "$RESOURCE_GROUP" \
@@ -198,10 +210,10 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 			computer_name="$vm_name"
 		fi
 
-		vm_ip=$(get_vm_ip_for_instance "$vmss_name" "$instance_id" "$vm_name")
+		vm_ip=$(get_vm_ip_for_instance "$vm_name" "$computer_name")
 
 		if [[ -z "$vm_ip" ]]; then
-			echo "Warning: IP lookup failed for VM '$vm_name' (instance '$instance_id', VMSS '$vmss_name')." >&2
+			echo "Warning: IP lookup failed for VM '$vm_name' (computer_name '$computer_name', instance '$instance_id', VMSS '$vmss_name')." >&2
 		fi
 
 		printf '%s\t%s\t%s\t%s\t%s\n' "$vmss_name" "$zone" "$vm_name" "$computer_name" "$vm_ip" >> "$TMP_ROWS_FILE"
@@ -270,6 +282,7 @@ PY
 
 printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
 echo "JSON written to $OUTPUT_FILE"
+
 
 
 ```
