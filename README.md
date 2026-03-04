@@ -124,7 +124,7 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 	if ! INSTANCE_TSV=$(az vmss list-instances \
 		--resource-group "$RESOURCE_GROUP" \
 		--name "$vmss_name" \
-		--query "[].[name, zones[0], osProfile.computerName]" \
+		--query "[].[instanceId, name, zones[0], osProfile.computerName]" \
 		-o tsv 2>&1); then
 		if echo "$INSTANCE_TSV" | grep -qi "virtualmachineScaleset/virtualMachines"; then
 			echo "Error: Missing Azure RBAC permission 'Microsoft.Compute/virtualMachineScaleSets/virtualMachines/read' for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
@@ -140,7 +140,7 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 		continue
 	fi
 
-	while IFS=$'\t' read -r vm_name zone computer_name; do
+	while IFS=$'\t' read -r instance_id vm_name zone computer_name; do
 		if [[ -z "$vm_name" ]]; then
 			continue
 		fi
@@ -153,20 +153,24 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 			computer_name="$vm_name"
 		fi
 
-		vm_ip=$(az vm show \
+		vm_ip=$(az vmss nic list-vm-nics \
 			--resource-group "$RESOURCE_GROUP" \
-			--name "$vm_name" \
-			--show-details \
-			--query "privateIps" \
+			--vmss-name "$vmss_name" \
+			--instance-id "$instance_id" \
+			--query "[0].ipConfigurations[0].privateIpAddress" \
 			-o tsv 2>/dev/null || true)
 
 		if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
-			vm_ip=$(az vm show \
+			public_ip_id=$(az vmss nic list-vm-nics \
 				--resource-group "$RESOURCE_GROUP" \
-				--name "$vm_name" \
-				--show-details \
-				--query "publicIps" \
+				--vmss-name "$vmss_name" \
+				--instance-id "$instance_id" \
+				--query "[0].ipConfigurations[0].publicIpAddress.id" \
 				-o tsv 2>/dev/null || true)
+
+			if [[ -n "$public_ip_id" && "$public_ip_id" != "null" ]]; then
+				vm_ip=$(az network public-ip show --ids "$public_ip_id" --query "ipAddress" -o tsv 2>/dev/null || true)
+			fi
 		fi
 
 		if [[ "$vm_ip" == "null" ]]; then
@@ -239,6 +243,7 @@ PY
 
 printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
 echo "JSON written to $OUTPUT_FILE"
+
 
 
 
