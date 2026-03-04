@@ -760,9 +760,17 @@ main
 ```
 
 ```
-az vmss nic list \
-  --resource-group <RESOURCE_GROUP> \
-  --vmss-name <VMSS_NAME> \
-  --query "[].{InstanceId:virtualMachine.id, ComputerName:virtualMachine.name, PrivateIP:ipConfigurations[0].privateIpAddress, Zone:zones[0]}" \
-  -o table
+RG="<RESOURCE_GROUP>"
+VMSS="<VMSS_NAME>"
+
+az vmss list-instances -g $RG -n $VMSS -o json | \
+jq -r '.[] | [.instanceId, .osProfile.computerName, (.zones[0] // "NA")] | @tsv' | \
+while IFS=$'\t' read instance computer zone
+do
+    ip=$(az vmss nic list -g $RG --vmss-name $VMSS \
+    --query "[?contains(virtualMachine.id, '/virtualMachines/$instance')].ipConfigurations[0].privateIpAddress" \
+    -o tsv)
+
+    printf "%-10s %-15s %-15s %-5s\n" "$instance" "$computer" "$ip" "$zone"
+done
 ```
