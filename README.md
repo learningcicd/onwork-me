@@ -121,70 +121,14 @@ fi
 TMP_ROWS_FILE=$(mktemp)
 trap 'rm -f "$TMP_ROWS_FILE"' EXIT
 
-get_vm_ip_for_instance() {
-	local vm_name="$1"
-	local computer_name="$2"
-	local vm_ip=""
-	local resolved_vm_name=""
-
-	# 1) Resolve ARM VM name by computer name (hostname), then read private IP
-	resolved_vm_name=$(az vm list \
-		--resource-group "$RESOURCE_GROUP" \
-		--query "[?osProfile.computerName=='$computer_name'].name | [0]" \
-		-o tsv 2>/dev/null || true)
-
-	if [[ -n "$resolved_vm_name" && "$resolved_vm_name" != "null" ]]; then
-		vm_ip=$(az vm list-ip-addresses \
-			--resource-group "$RESOURCE_GROUP" \
-			--name "$resolved_vm_name" \
-			--query "[0].virtualMachine.network.privateIpAddresses[0]" \
-			-o tsv 2>/dev/null || true)
-	fi
-
-	# 2) Fallback: try with instance VM name
-	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
-		vm_ip=$(az vm list-ip-addresses \
-			--resource-group "$RESOURCE_GROUP" \
-			--name "$vm_name" \
-			--query "[0].virtualMachine.network.privateIpAddresses[0]" \
-			-o tsv 2>/dev/null || true)
-	fi
-
-	# 3) Public IP fallback by computer-name-resolved VM
-	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
-		if [[ -n "$resolved_vm_name" && "$resolved_vm_name" != "null" ]]; then
-			vm_ip=$(az vm list-ip-addresses \
-				--resource-group "$RESOURCE_GROUP" \
-				--name "$resolved_vm_name" \
-				--query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" \
-				-o tsv 2>/dev/null || true)
-		fi
-	fi
-
-	# 4) Public IP fallback by instance VM name
-	if [[ -z "$vm_ip" || "$vm_ip" == "null" ]]; then
-		vm_ip=$(az vm list-ip-addresses \
-			--resource-group "$RESOURCE_GROUP" \
-			--name "$vm_name" \
-			--query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" \
-			-o tsv 2>/dev/null || true)
-	fi
-
-	if [[ "$vm_ip" == "null" ]]; then
-		vm_ip=""
-	fi
-
-	echo "$vm_ip"
-}
-
 for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
-	if ! INSTANCE_TSV=$(az vmss list-instances \
+	if ! INSTANCE_TSV=$(az vmss nic list \
 		--resource-group "$RESOURCE_GROUP" \
-		--name "$vmss_name" \
-		--query "[].[instanceId, name, zones[0], osProfile.computerName]" \
+		--vmss-name "$vmss_name" \
+		--query "[].[virtualMachine.id, virtualMachine.name, ipConfigurations[0].privateIpAddress, zones[0]]" \
 		-o tsv 2>&1); then
-		if echo "$INSTANCE_TSV" | grep -qi "virtualmachineScaleset/virtualMachines"; then
-			echo "Error: Missing Azure RBAC permission 'Microsoft.Compute/virtualMachineScaleSets/virtualMachines/read' for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
+		if echo "$INSTANCE_TSV" | grep -qi "virtualmachineScalesets/networkinterfaces\|virtualmachineScaleset/virtualMachines"; then
+			echo "Error: Missing Azure RBAC permission to read VMSS NICs for VMSS '$vmss_name' in resource group '$RESOURCE_GROUP'." >&2
 			echo "Grant Reader (or Virtual Machine Contributor/Contributor) on the VMSS or resource group and retry." >&2
 		else
 			echo "Error: Failed to fetch instances for VMSS '$vmss_name':" >&2
@@ -197,8 +141,8 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 		continue
 	fi
 
-	while IFS=$'\t' read -r instance_id vm_name zone computer_name; do
-		if [[ -z "$vm_name" ]]; then
+	while IFS=$'\t' read -r vm_resource_id computer_name vm_ip zone; do
+		if [[ -z "$computer_name" ]]; then
 			continue
 		fi
 
@@ -206,11 +150,12 @@ for vmss_name in "${FILTERED_VMSS_LIST[@]}"; do
 			zone="no-zone"
 		fi
 
-		if [[ -z "$computer_name" ]]; then
-			computer_name="$vm_name"
+		if [[ "$vm_ip" == "null" ]]; then
+			vm_ip=""
 		fi
 
-		vm_ip=$(get_vm_ip_for_instance "$vm_name" "$computer_name")
+		vm_name="$computer_name"
+		instance_id="${vm_resource_id##*/}"
 
 		if [[ -z "$vm_ip" ]]; then
 			echo "Warning: IP lookup failed for VM '$vm_name' (computer_name '$computer_name', instance '$instance_id', VMSS '$vmss_name')." >&2
@@ -282,6 +227,7 @@ PY
 
 printf '%s\n' "$RESULT_JSON" > "$OUTPUT_FILE"
 echo "JSON written to $OUTPUT_FILE"
+
 
 
 
