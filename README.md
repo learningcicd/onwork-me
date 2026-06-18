@@ -35,7 +35,16 @@ for SUBSCRIPTION in "${SUBSCRIPTIONS[@]}"; do
       jq -r '.[] | select(.name == "FUNCTIONS_WORKER_RUNTIME") | .value')
 
     if [[ "$RUNTIME" == "dotnet" ]]; then
-      echo "✅ MATCH: $NAME | RG: $RG | Sub: $SUBSCRIPTION"
+      echo " MATCH: $NAME | RG: $RG | Sub: $SUBSCRIPTION"
     else
-      echo "⬜ SKIP:  $NAME | RG: $RG |
+      echo " SKIP:  $NAME | RG: $RG | RUNTIME = ${RUNTIME:-<not set>}"
+    fi
+  done
+
+done
+
+echo ""
+echo "========================================================"
+echo "Scan complete across both subscriptions."
+echo "========================================================"
 ```
