@@ -1,50 +1,66 @@
 ```
-#!/bin/bash
+# templates/build-stage.yml
+# Reusable .NET build stage template
 
-# Define your two non-prod subscriptions
-SUBSCRIPTIONS=(
-  "your-subscription-id-or-name-1"
-  "your-subscription-id-or-name-2"
-)
+parameters:
+  - name: artifactName
+    type: string
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+  - name: dotnetVersion
+    type: string
+    default: '8.0.x'
+  - name: useGlobalJson
+    type: boolean
+    default: true
+  - name: projectPattern
+    type: string
+    default: '**/*.csproj'
+  - name: stageName
+    type: string
+    default: 'Build'
 
-MATCH_COUNT=0
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build Job
+        steps:
+          - bash: |
+              version=$(grep '<Version>' < *.csproj | sed 's/.*<Version>\(.*\)<\/Version>/\1/')
+              echo "##vso[task.setvariable variable=VERSION]$version"
+              echo "##vso[task.setvariable variable=gitBranch]$(echo $(Build.SourceBranch) | sed -e 's/^refs\/heads\///g' -e 's/\//-/g')"
+            displayName: 'Variable Set'
 
-for SUBSCRIPTION in "${SUBSCRIPTIONS[@]}"; do
-  echo ""
-  echo "========================================================"
-  echo "Switching to subscription: $SUBSCRIPTION"
-  echo "========================================================"
-  az account set --subscription "$SUBSCRIPTION"
+          - task: UseDotNet@2
+            displayName: 'Use .NET SDK'
+            inputs:
+              packageType: 'sdk'
+              ${{ if parameters.useGlobalJson }}:
+                useGlobalJson: true
+              ${{ else }}:
+                version: ${{ parameters.dotnetVersion }}
 
-  # Get all function apps in this subscription
-  FUNCTION_APPS=$(az functionapp list --query "[].{name:name, rg:resourceGroup}" -o json)
+          - task: DotNetCoreCLI@2
+            displayName: 'DotNet Restore'
+            inputs:
+              command: 'restore'
+              projects: ${{ parameters.projectPattern }}
 
-  APP_COUNT=$(echo "$FUNCTION_APPS" | jq length)
-  echo "Found $APP_COUNT function app(s) in this subscription."
-  echo ""
+          - task: DotNetCoreCLI@2
+            displayName: 'Publish build artifact staging directory'
+            inputs:
+              command: publish
+              publishWebProjects: false
+              projects: ${{ parameters.projectPattern }}
+              arguments: '-c ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)/$(VERSION)-b$(Build.BuildId)'
+              zipAfterPublish: true
 
-  # Loop through each function app
-  echo "$FUNCTION_APPS" | jq -c '.[]' | while read -r app; do
-    NAME=$(echo "$app" | jq -r '.name')
-    RG=$(echo "$app" | jq -r '.rg')
-
-    RUNTIME=$(az functionapp config appsettings list \
-      --name "$NAME" \
-      --resource-group "$RG" \
-      -o json 2>/dev/null | \
-      jq -r '.[] | select(.name == "FUNCTIONS_WORKER_RUNTIME") | .value')
-
-    if [[ "$RUNTIME" == "dotnet" ]]; then
-      echo " MATCH: $NAME | RG: $RG | Sub: $SUBSCRIPTION"
-    else
-      echo " SKIP:  $NAME | RG: $RG | RUNTIME = ${RUNTIME:-<not set>}"
-    fi
-  done
-
-done
-
-echo ""
-echo "========================================================"
-echo "Scan complete across both subscriptions."
-echo "========================================================"
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish build artifact'
+            inputs:
+              pathtoPublish: '$(Build.ArtifactStagingDirectory)/$(VERSION)-b$(Build.BuildId)'
+              artifactName: ${{ parameters.artifactName }}
 ```
