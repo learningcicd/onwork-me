@@ -21,10 +21,6 @@ parameters:
     displayName: Deploy App Settings
     type: boolean
     default: true
-  - name: dryrun
-    displayName: "Dry Run"
-    type: boolean
-    default: false
 
 variables:
   - name: buildPipelineProject
@@ -36,7 +32,7 @@ variables:
   - name: artifactName
     value: 'RxInventory.PurchaseOrderManagement'
   - name: envs
-    value: "dev,dev2,devqe,devqe2,sit,sit2,e2e,e2e2,uat,pet,perf,perf_02"
+    value: "sit,sit2,e2e,e2e2,uat,pet,perf,perf_02"
   - name: devopsApprovers
     value: "[RxI-DevOps-Deployment]\\RxI DevOps - Team"
   - name: deployApprovers
@@ -71,32 +67,12 @@ stages:
 
   - ${{ each env in split(variables.envs, ',') }}:
     - stage: deploy_stage_${{ replace(env, '-', '_') }}
-      displayName: "${{ env }} ${{ iif(eq(parameters.dryrun,'true'), '(dryrun)', '') }}"
+      displayName: "${{ env }}"
       dependsOn: []
       isSkippable: false
       variables:
         - name: displayEnv
           value: ${{ replace(env, '-', '_') }}
-        - ${{ if eq(env, 'dev') }}:
-          - name: deployServiceConnection
-            value: RxI-Dev2-Leap-05
-          - name: functionAppName
-            value: rxr-rxi-dev-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'dev2') }}:
-          - name: deployServiceConnection
-            value: RxI-Dev2-Leap-05
-          - name: functionAppName
-            value: rxr-rxi-dev-02-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'devqe') }}:
-          - name: deployServiceConnection
-            value: RxI-DEVQE-05-StaticWebSite
-          - name: functionAppName
-            value: rxr-rxi-devqe-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'devqe2') }}:
-          - name: deployServiceConnection
-            value: RxI-DEVQE-05-StaticWebSite
-          - name: functionAppName
-            value: rxr-rxi-devqe-02-cus-fa-purchaseordermanagement
         - ${{ if eq(env, 'sit') }}:
           - name: deployServiceConnection
             value: RxI-SIT-Leap
@@ -214,8 +190,8 @@ stages:
             #     package: '$(downloadedArtifacts)/${{ env }}/**/*${{ parameters.artifactName }}*.zip'
             #     serviceConnection: '$(deployServiceConnection)'
             #     healthcheckEnabled: false
-            #     functionAppDeployEnabled: ${{ and(eq(parameters.deployCode, true), not(parameters.dryrun)) }}
-            #     functionAppSettingsPublishEnabled: ${{ and(eq(parameters.deployAppSettings, true), not(parameters.dryrun)) }}
+            #     functionAppDeployEnabled: ${{ parameters.deployCode }}
+            #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
 ################################################ END NONPROD DEPLOYMENTS ################################################
 
   - stage: BreakGlassApproval
@@ -240,10 +216,6 @@ stages:
   - stage: QEFinalApproval
     displayName: QE Review & Approval for Prod
     dependsOn:
-      - deploy_stage_dev
-      - deploy_stage_dev2
-      - deploy_stage_devqe
-      - deploy_stage_devqe2
       - deploy_stage_sit
       - deploy_stage_sit2
       - deploy_stage_e2e
@@ -255,10 +227,6 @@ stages:
       - BreakGlassApproval
     condition: |
       or(
-        succeeded('deploy_stage_dev'),
-        succeeded('deploy_stage_dev2'),
-        succeeded('deploy_stage_devqe'),
-        succeeded('deploy_stage_devqe2'),
         succeeded('deploy_stage_sit'),
         succeeded('deploy_stage_sit2'),
         succeeded('deploy_stage_e2e'),
