@@ -144,48 +144,54 @@ stages:
             - pwsh: |
                 Write-Host "Artifact download complete for ${{ env }}"
               displayName: "Confirm artifact download"
-            # deployment steps are enabled for dev only; all other environments
-            # download the artifact and stop there
-            - ${{ if eq(env, 'dev') }}:
-              - task: PowerShell@2
-                name: checkAzureEnvironment
-                displayName: Check Azure Environment
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    # Get-InstalledModule -Name Az.Accounts
-                    $azVersion = az --version | ForEach-Object {
-                      $_ -match '\s*azure-cli\s+(?<version>\d+\.\d+\.\d+)\s*'
-                      $Matches['version']
-                    } | Where-Object { !!$_ } | Select-Object -First 1
+            - task: PowerShell@2
+              name: checkAzureEnvironment
+              displayName: Check Azure Environment
+              inputs:
+                targetType: 'inline'
+                script: |
+                  # Get-InstalledModule -Name Az.Accounts
+                  $azVersion = az --version | ForEach-Object {
+                    $_ -match '\s*azure-cli\s+(?<version>\d+\.\d+\.\d+)\s*'
+                    $Matches['version']
+                  } | Where-Object { !!$_ } | Select-Object -First 1
 
-                    Write-Host "Az CLI version: $($azVersion)"
-                  failOnStderr: false
-                  showWarnings: true
-                  pwsh: true
-              - task: PowerShell@2
-                name: buildAppSettings
-                displayName: Build App Settings
-                condition: eq(${{ parameters.deployAppSettings }}, true)
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-                    & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName '${{ env }}' -OutputPath '$(appSettingsFile)'
-                  failOnStderr: true
-                  showWarnings: true
-                  pwsh: true
-              - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
-                parameters:
-                  appSettingsPath: '$(appSettingsFile)'
-                  appName: '$(functionAppName)'
-                  package: '$(downloadedArtifacts)/${{ env }}/**/*${{ parameters.artifactName }}*.zip'
-                  healthcheckEnabled: false
-                  functionAppDeployEnabled: ${{ parameters.deployCode }}
-                  functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
-                  # service connection MUST be a literal resolved at compile time -
-                  # a $( ) runtime macro cannot be authorized by Azure DevOps
+                  Write-Host "Az CLI version: $($azVersion)"
+                failOnStderr: false
+                showWarnings: true
+                pwsh: true
+            - task: PowerShell@2
+              name: buildAppSettings
+              displayName: Build App Settings
+              condition: eq(${{ parameters.deployAppSettings }}, true)
+              inputs:
+                targetType: 'inline'
+                script: |
+                  New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
+                  & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName '${{ env }}' -OutputPath '$(appSettingsFile)'
+                failOnStderr: true
+                showWarnings: true
+                pwsh: true
+            - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
+              parameters:
+                appSettingsPath: '$(appSettingsFile)'
+                appName: '$(functionAppName)'
+                package: '$(downloadedArtifacts)/${{ env }}/**/*${{ parameters.artifactName }}*.zip'
+                healthcheckEnabled: false
+                functionAppDeployEnabled: ${{ parameters.deployCode }}
+                functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
+                # service connection MUST be a literal resolved at compile time -
+                # a $( ) runtime macro cannot be authorized by Azure DevOps
+                ${{ if eq(env, 'dev') }}:
                   serviceConnection: RxI-Dev2-Leap-05
+                ${{ if eq(env, 'e2e') }}:
+                  serviceConnection: RxI-E2E-Leap-05
+                ${{ if eq(env, 'e2e-2') }}:
+                  serviceConnection: RxI-E2E-02-Leap
+                ${{ if eq(env, 'perf') }}:
+                  serviceConnection: RxI-PERF-05
+                ${{ if eq(env, 'perf-2') }}:
+                  serviceConnection: RxI-PERF-05
 ################################################ END NONPROD DEPLOYMENTS ################################################
 
   - stage: BreakGlassApproval
@@ -306,6 +312,9 @@ stages:
           #     failOnStderr: true
           #     showWarnings: true
           #     pwsh: true
+          # NOTE: serviceConnection below is already a compile-time literal -
+          #       do NOT change it back to '$(deployServiceConnection)', a runtime
+          #       macro cannot be resolved or authorized by Azure DevOps.
           # - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
           #   parameters:
           #     appSettingsPath: '$(appSettingsFile)'
@@ -386,6 +395,9 @@ stages:
           #     failOnStderr: true
           #     showWarnings: true
           #     pwsh: true
+          # NOTE: serviceConnection below is already a compile-time literal -
+          #       do NOT change it back to '$(deployServiceConnection)', a runtime
+          #       macro cannot be resolved or authorized by Azure DevOps.
           # - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
           #   parameters:
           #     appSettingsPath: '$(appSettingsFile)'
