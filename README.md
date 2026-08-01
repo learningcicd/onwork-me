@@ -160,6 +160,39 @@ stages:
                 failOnStderr: false
                 showWarnings: true
                 pwsh: true
+            # STEP 1: capture the CURRENT (pre-deploy) live app settings and print them.
+            # Runs BEFORE Build App Settings so we snapshot the live state first.
+            # Writes the live values to a file so the later diff step can compare.
+            # Uses the per-env deploy service connection; runtime-safe because
+            # AzureCLI resolves azureSubscription at runtime, not compile time.
+            - task: AzureCLI@2
+              name: captureAppSettings
+              displayName: "Capture existing app settings (${{ env }})"
+              inputs:
+                azureSubscription: $(deployServiceConnection)
+                scriptType: pscore
+                scriptLocation: inlineScript
+                inlineScript: |
+                  $appName = "$(functionAppName)"
+                  $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/live-app-settings.json"
+                  New-Item -Path $liveFile -ItemType File -Force | Out-Null
+                  Write-Host "===== Existing (live) app settings for $appName [${{ env }}] - pre-deploy snapshot ====="
+
+                  # resolve the resource group from the function app name so we don't
+                  # have to hard-code an RG per environment
+                  $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
+                  if (-not $rg) {
+                    Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
+                    '[]' | Set-Content -Path $liveFile
+                  }
+                  else {
+                    Write-Host "Resource group: $rg"
+                    az functionapp config appsettings list --name $appName --resource-group $rg --output table
+                    az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
+                    Write-Host "##vso[task.setvariable variable=liveSettingsFile]$liveFile"
+                  }
+                  Write-Host "===== End of live snapshot ====="
+            # STEP 2: build the NEW app settings file we intend to deploy.
             - task: PowerShell@2
               name: buildAppSettings
               displayName: Build App Settings
@@ -172,6 +205,52 @@ stages:
                 failOnStderr: true
                 showWarnings: true
                 pwsh: true
+            # STEP 3: diff live (pre-deploy) vs new (about-to-deploy) settings, print to log.
+            - task: PowerShell@2
+              name: diffAppSettings
+              displayName: "Diff app settings: live vs new (${{ env }})"
+              condition: eq(${{ parameters.deployAppSettings }}, true)
+              inputs:
+                targetType: 'inline'
+                pwsh: true
+                script: |
+                  $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/live-app-settings.json"
+                  $newFile  = "$(appSettingsFile)"
+
+                  function Read-Settings($path) {
+                    $map = @{}
+                    if (-not (Test-Path $path)) { return $map }
+                    $raw = Get-Content -Path $path -Raw
+                    if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
+                    try { $json = $raw | ConvertFrom-Json } catch { return $map }
+                    foreach ($item in @($json)) {
+                      if ($null -eq $item) { continue }
+                      # az output is [{name,value,slotSetting}]; build file may be {name:value} or the same shape
+                      if ($item.PSObject.Properties.Name -contains 'name') {
+                        $map[$item.name] = "$($item.value)"
+                      } else {
+                        foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" }
+                      }
+                    }
+                    return $map
+                  }
+
+                  $live = Read-Settings $liveFile
+                  $new  = Read-Settings $newFile
+                  $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
+
+                  Write-Host "===== App settings diff for ${{ env }} (live -> new) ====="
+                  $changes = 0
+                  foreach ($k in $allKeys) {
+                    $inLive = $live.ContainsKey($k)
+                    $inNew  = $new.ContainsKey($k)
+                    if     (-not $inLive -and $inNew) { Write-Host "[ADDED]    $k = $($new[$k])"; $changes++ }
+                    elseif ($inLive -and -not $inNew) { Write-Host "[REMOVED]  $k (was: $($live[$k]))"; $changes++ }
+                    elseif ($live[$k] -ne $new[$k])   { Write-Host "[CHANGED]  $k : '$($live[$k])' -> '$($new[$k])'"; $changes++ }
+                  }
+                  if ($changes -eq 0) { Write-Host "No differences - live and new app settings are identical." }
+                  else { Write-Host "Total differences: $changes" }
+                  Write-Host "===== End of diff ====="
             - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
               parameters:
                 appSettingsPath: '$(appSettingsFile)'
