@@ -169,7 +169,18 @@ stages:
               name: captureAppSettings
               displayName: "Capture existing app settings (${{ env }})"
               inputs:
-                azureSubscription: $(deployServiceConnection)
+                # azureSubscription is resolved at COMPILE time - must be a literal,
+                # not the $(deployServiceConnection) runtime macro
+                ${{ if eq(env, 'dev') }}:
+                  azureSubscription: RxI-Dev2-Leap-05
+                ${{ if eq(env, 'e2e') }}:
+                  azureSubscription: RxI-E2E-Leap-05
+                ${{ if eq(env, 'e2e-2') }}:
+                  azureSubscription: RxI-E2E-02-Leap
+                ${{ if eq(env, 'perf') }}:
+                  azureSubscription: RxI-PERF-05
+                ${{ if eq(env, 'perf-2') }}:
+                  azureSubscription: RxI-PERF-05
                 scriptType: pscore
                 scriptLocation: inlineScript
                 inlineScript: |
