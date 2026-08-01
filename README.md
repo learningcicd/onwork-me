@@ -101,14 +101,21 @@ stages:
         - name: appSettingsFile
           value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/app-settings.json'
       jobs:
-        # ---- Gate 1: approve to begin this environment ----
-        - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-          parameters:
-            jobName: approvalJob
-            timeoutInMinutes: 10
-            # NOTE! Possible defect! I'm unable to use an email in this list, although Microsoft docs state that I should be able to!
-            approvers: |
-              ${{ variables.testingStageApprovers }}
+        # ---- Gate 1: approve to begin this environment (inline ManualValidation) ----
+        # inline (not the shared template) so the 2-min timeout is actually enforced
+        # on the ManualValidation task itself.
+        - job: approvalJob
+          displayName: Manual approval (${{ env }})
+          pool: server   # agentless - required for ManualValidation
+          timeoutInMinutes: 5
+          steps:
+            - task: ManualValidation@0
+              timeoutInMinutes: 2
+              inputs:
+                notifyUsers: |
+                  ${{ variables.testingStageApprovers }}
+                instructions: "Approve to begin the ${{ env }} deployment."
+                onTimeout: 'reject'
 
         # ---- Prep job: download artifact, capture live settings, build new, diff (table) ----
         - job: prepJob
@@ -233,15 +240,20 @@ stages:
                   $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
                   Write-Host "Summary: $chg to add/change, $lo live-only (untouched)."
 
-        # ---- Gate 2: review the diff above and approve to proceed with deploy ----
-        - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-          parameters:
-            jobName: diffApprovalJob
-            dependsOn: prepJob
-            displayName: Review app settings diff (${{ env }})
-            timeoutInMinutes: 10
-            approvers: |
-              ${{ variables.testingStageApprovers }}
+        # ---- Gate 2: review the diff above, then approve to proceed (inline ManualValidation) ----
+        - job: diffApprovalJob
+          dependsOn: prepJob
+          displayName: Review app settings diff (${{ env }})
+          pool: server   # agentless - required for ManualValidation
+          timeoutInMinutes: 5
+          steps:
+            - task: ManualValidation@0
+              timeoutInMinutes: 2
+              inputs:
+                notifyUsers: |
+                  ${{ variables.testingStageApprovers }}
+                instructions: "Review the app settings diff for ${{ env }} in the prep job log, then approve to deploy."
+                onTimeout: 'reject'
 
         # ---- Deploy job: runs only after the diff has been approved ----
         - job: deployJob
