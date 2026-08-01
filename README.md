@@ -107,10 +107,10 @@ stages:
         - job: approvalJob
           displayName: Manual approval (${{ env }})
           pool: server   # agentless - required for ManualValidation
-          timeoutInMinutes: 5
+          timeoutInMinutes: 60   # must be > the task timeout below (MS docs); task timeout is the real limit
           steps:
             - task: ManualValidation@0
-              timeoutInMinutes: 2
+              timeoutInMinutes: 2   # gate auto-rejects after 2 minutes
               inputs:
                 notifyUsers: |
                   ${{ variables.testingStageApprovers }}
@@ -245,10 +245,10 @@ stages:
           dependsOn: prepJob
           displayName: Review app settings diff (${{ env }})
           pool: server   # agentless - required for ManualValidation
-          timeoutInMinutes: 5
+          timeoutInMinutes: 60   # must be > the task timeout below (MS docs); task timeout is the real limit
           steps:
             - task: ManualValidation@0
-              timeoutInMinutes: 2
+              timeoutInMinutes: 2   # gate auto-rejects after 2 minutes
               inputs:
                 notifyUsers: |
                   ${{ variables.testingStageApprovers }}
