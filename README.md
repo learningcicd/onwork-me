@@ -108,6 +108,17 @@ stages:
           pool: { name: $(poolName), demands: azureps }
           timeoutInMinutes: 60
           steps:
+            - pwsh: |
+                Write-Host "======================================================"
+                Write-Host " Deployment inputs for ${{ env }}"
+                Write-Host "======================================================"
+                Write-Host "Artifact Name       : ${{ parameters.artifactName }}"
+                Write-Host "Branch Name         : ${{ parameters.branchName }}"
+                Write-Host "Deploy Code         : ${{ parameters.deployCode }}"
+                Write-Host "Deploy App Settings : ${{ parameters.deployAppSettings }}"
+                Write-Host "Function App        : $(functionAppName)"
+                Write-Host "======================================================"
+              displayName: "Show run inputs (${{ env }})"
             - ${{ if eq(parameters.deployCode, true) }}:
               - task: PowerShell@2
                 displayName: Normalize version metadata
@@ -236,7 +247,7 @@ stages:
               inputs:
                 notifyUsers: |
                   ${{ variables.testingStageApprovers }}
-                instructions: "Review the app settings diff for ${{ env }} in the prep job log, then approve to deploy."
+                instructions: "Artifact: ${{ parameters.artifactName }} | Env: ${{ env }}. Review the app settings diff in the 'Prepare & Diff' job log, then approve to deploy."
                 onTimeout: 'reject'
 
         # ---- Deploy job: runs only after the diff has been approved ----
