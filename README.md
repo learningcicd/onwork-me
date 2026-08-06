@@ -212,7 +212,7 @@ stages:
                     $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
                     if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
                     elseif ($inNew -and $live[$k] -ne $new[$k])  { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                    elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue='(unchanged)' } }
+                    elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue='' } }
                   }
 
                   Write-Host "======================================================"
