@@ -212,6 +212,7 @@ stages:
                     $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
                     if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
                     elseif ($inNew -and $live[$k] -ne $new[$k])  { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
+                    elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
                     elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue='' } }
                   }
 
@@ -231,8 +232,9 @@ stages:
                   else { Write-Host "No settings found to compare." }
 
                   $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
+                  $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
                   $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                  Write-Host "Summary: $chg to add/change, $lo live-only (untouched)."
+                  Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
 
         # ---- Single approval gate: review the diff above, then approve to deploy ----
         - job: diffApprovalJob
