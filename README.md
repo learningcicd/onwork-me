@@ -204,6 +204,19 @@ stages:
 
                   function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
 
+                  # Treat two values as equal if their strings match OR they parse to the same date/time.
+                  # This avoids false CHANGED rows when only the timestamp FORMAT differs
+                  # (e.g. '08/28/2023 00:00:00' vs '2023-08-28T00:00:00.000Z') - Azure normalizes
+                  # the format on deploy, so the value is effectively unchanged.
+                  function ValuesEqual($a, $b) {
+                    if ($a -eq $b) { return $true }
+                    $da = [datetime]::MinValue; $db = [datetime]::MinValue
+                    $okA = [datetime]::TryParse($a, [ref]$da)
+                    $okB = [datetime]::TryParse($b, [ref]$db)
+                    if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
+                    return $false
+                  }
+
                   $live = Read-Settings $liveFile
                   $new  = Read-Settings $newFile
                   $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
@@ -211,7 +224,7 @@ stages:
                   $rows = foreach ($k in $allKeys) {
                     $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
                     if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                    elseif ($inNew -and $live[$k] -ne $new[$k])  { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
+                    elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
                     elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='***redacted***';          NewValue='***redacted***' } }
                     elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='***redacted***';          NewValue='' } }
                   }
