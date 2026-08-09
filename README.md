@@ -32,7 +32,7 @@ variables:
   - name: artifactName
     value: 'RxInventory.PurchaseOrderManagement'
   - name: envs
-    value: "dev,e2e,e2e-2,perf-01,prodfix-01"
+    value: "dev,e2e-01,e2e-02,perf-01,prodfix-01"
   - name: devopsApprovers
     value: "[RxI-DevOps-Deployment]\\RxI DevOps - Team"
   - name: deployApprovers
@@ -78,12 +78,12 @@ stages:
             value: RxI-Dev2-Leap-05
           - name: functionAppName
             value: rxr-rxi-dev-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'e2e') }}:
+        - ${{ if eq(env, 'e2e-01') }}:
           - name: deployServiceConnection
             value: RxI-E2E-Leap-05
           - name: functionAppName
             value: rxr-rxi-e2e-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'e2e-2') }}:
+        - ${{ if eq(env, 'e2e-02') }}:
           - name: deployServiceConnection
             value: RxI-E2E-02-Leap
           - name: functionAppName
@@ -141,9 +141,9 @@ stages:
               inputs:
                 ${{ if eq(env, 'dev') }}:
                   azureSubscription: RxI-Dev2-Leap-05
-                ${{ if eq(env, 'e2e') }}:
+                ${{ if eq(env, 'e2e-01') }}:
                   azureSubscription: RxI-E2E-Leap-05
-                ${{ if eq(env, 'e2e-2') }}:
+                ${{ if eq(env, 'e2e-02') }}:
                   azureSubscription: RxI-E2E-02-Leap
                 ${{ if eq(env, 'perf-01') }}:
                   azureSubscription: RxI-PERF-05
@@ -337,9 +337,9 @@ stages:
                 functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
                 ${{ if eq(env, 'dev') }}:
                   serviceConnection: RxI-Dev2-Leap-05
-                ${{ if eq(env, 'e2e') }}:
+                ${{ if eq(env, 'e2e-01') }}:
                   serviceConnection: RxI-E2E-Leap-05
-                ${{ if eq(env, 'e2e-2') }}:
+                ${{ if eq(env, 'e2e-02') }}:
                   serviceConnection: RxI-E2E-02-Leap
                 ${{ if eq(env, 'perf-01') }}:
                   serviceConnection: RxI-PERF-05
@@ -371,16 +371,16 @@ stages:
     displayName: QE Review & Approval for Prod
     dependsOn:
       - deploy_stage_dev
-      - deploy_stage_e2e
-      - deploy_stage_e2e_2
+      - deploy_stage_e2e_01
+      - deploy_stage_e2e_02
       - deploy_stage_perf_01
       - deploy_stage_prodfix_01
       - BreakGlassApproval
     condition: |
       or(
         succeeded('deploy_stage_dev'),
-        succeeded('deploy_stage_e2e'),
-        succeeded('deploy_stage_e2e_2'),
+        succeeded('deploy_stage_e2e_01'),
+        succeeded('deploy_stage_e2e_02'),
         succeeded('deploy_stage_perf_01'),
         succeeded('deploy_stage_prodfix_01'),
         succeeded('BreakGlassApproval')
