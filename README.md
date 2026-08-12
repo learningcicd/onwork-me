@@ -347,16 +347,52 @@ stages:
                   serviceConnection: RxI-PRODFIX-05
 ################################################ END NONPROD DEPLOYMENTS ################################################
 
-  - stage: ProdDiff
-    displayName: Prepare & Diff prod
-    dependsOn: []   # runs immediately at pipeline trigger, independent of nonprod
+  - stage: BreakGlassApproval
+    displayName: Break-Glass Approval
+    dependsOn: []
+    isSkippable: false
+    jobs:
+      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
+        parameters:
+          jobName: approvalJob
+          timeoutInMinutes: 10
+          approvers: |
+            ${{ variables.breakGlassApprovers }}
+      - job: BreakGlassApproval
+        dependsOn: approvalJob
+        pool: { name: $(poolName) }
+        steps:
+          - pwsh: |
+              Write-Host "Break-Glass approval granted!"
+            displayName: "Break-Glass Approval"
+
+################################################ START QE APPROVAL STAGE (now also owns Prepare & Diff prod) ################################################
+  - stage: QEFinalApproval
+    displayName: QE Review & Approval for Prod
+    dependsOn:
+      - deploy_stage_dev
+      - deploy_stage_e2e_01
+      - deploy_stage_e2e_02
+      - deploy_stage_perf_01
+      - deploy_stage_prodfix_01
+      - BreakGlassApproval
+    condition: |
+      or(
+        succeeded('deploy_stage_dev'),
+        succeeded('deploy_stage_e2e_01'),
+        succeeded('deploy_stage_e2e_02'),
+        succeeded('deploy_stage_perf_01'),
+        succeeded('deploy_stage_prodfix_01'),
+        succeeded('BreakGlassApproval')
+      )
+    isSkippable: false
     variables:
       - name: prodFunctionAppName
         value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
       - name: prodAppSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/app-settings.json'
     jobs:
-      # Prepare & Diff for prod: compare repo app-settings.json vs live prod settings
+      # ---- Prepare & Diff for prod now runs INSIDE the QE gate stage ----
       - job: prepProdJob
         displayName: Prepare & Diff prod
         pool: { name: $(poolName), demands: azureps }
@@ -474,51 +510,7 @@ stages:
                 Write-Host ""
                 Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
 
-
-  - stage: BreakGlassApproval
-    displayName: Break-Glass Approval
-    dependsOn: []
-    isSkippable: false
-    jobs:
-      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-        parameters:
-          jobName: approvalJob
-          timeoutInMinutes: 10
-          approvers: |
-            ${{ variables.breakGlassApprovers }}
-      - job: BreakGlassApproval
-        dependsOn: approvalJob
-        pool: { name: $(poolName) }
-        steps:
-          - pwsh: |
-              Write-Host "Break-Glass approval granted!"
-            displayName: "Break-Glass Approval"
-
-################################################ START QE APPROVAL STAGE ################################################
-  - stage: QEFinalApproval
-    displayName: QE Review & Approval for Prod
-    dependsOn:
-      - ProdDiff
-      - deploy_stage_dev
-      - deploy_stage_e2e_01
-      - deploy_stage_e2e_02
-      - deploy_stage_perf_01
-      - deploy_stage_prodfix_01
-      - BreakGlassApproval
-    condition: |
-      and(
-        succeeded('ProdDiff'),
-        or(
-          succeeded('deploy_stage_dev'),
-          succeeded('deploy_stage_e2e_01'),
-          succeeded('deploy_stage_e2e_02'),
-          succeeded('deploy_stage_perf_01'),
-          succeeded('deploy_stage_prodfix_01'),
-          succeeded('BreakGlassApproval')
-        )
-      )
-    isSkippable: false
-    jobs:
+      # ---- QE approval now gated on the prod diff above, within the same stage ----
       - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
         parameters:
           jobName: qe_final_approval
