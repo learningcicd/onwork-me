@@ -347,26 +347,6 @@ stages:
                   serviceConnection: RxI-PRODFIX-05
 ################################################ END NONPROD DEPLOYMENTS ################################################
 
-  - stage: BreakGlassApproval
-    displayName: Break-Glass Approval
-    dependsOn: []
-    isSkippable: false
-    jobs:
-      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-        parameters:
-          jobName: approvalJob
-          timeoutInMinutes: 10
-          approvers: |
-            ${{ variables.breakGlassApprovers }}
-      - job: BreakGlassApproval
-        dependsOn: approvalJob
-        pool: { name: $(poolName) }
-        steps:
-          - pwsh: |
-              Write-Host "Break-Glass approval granted!"
-            displayName: "Break-Glass Approval"
-
-################################################ START QE APPROVAL STAGE ################################################
   - stage: ProdDiff
     displayName: Prepare & Diff prod
     dependsOn: []   # runs immediately at pipeline trigger, independent of nonprod
@@ -495,6 +475,26 @@ stages:
                 Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
 
 
+  - stage: BreakGlassApproval
+    displayName: Break-Glass Approval
+    dependsOn: []
+    isSkippable: false
+    jobs:
+      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
+        parameters:
+          jobName: approvalJob
+          timeoutInMinutes: 10
+          approvers: |
+            ${{ variables.breakGlassApprovers }}
+      - job: BreakGlassApproval
+        dependsOn: approvalJob
+        pool: { name: $(poolName) }
+        steps:
+          - pwsh: |
+              Write-Host "Break-Glass approval granted!"
+            displayName: "Break-Glass Approval"
+
+################################################ START QE APPROVAL STAGE ################################################
   - stage: QEFinalApproval
     displayName: QE Review & Approval for Prod
     dependsOn:
