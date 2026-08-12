@@ -604,8 +604,8 @@ stages:
           #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
 ################################################ END PROD DEPLOYMENT STAGE ################################################
 ################################################ START PRODFIX DEPLOYMENT STAGES ################################################
-  - stage: post_deploy_stage_prodfix
-    displayName: "Deploy to prodfix"
+  - stage: post_deploy_stage_prodfix_01
+    displayName: "Deploy to prodfix-01"
     dependsOn: DeployToProd
     condition: succeeded('DeployToProd')
     variables:
@@ -614,7 +614,7 @@ stages:
       - name: functionAppName
         value: rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement
       - name: appSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix/app-settings.json'
+        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/app-settings.json'
     jobs:
       - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
         parameters:
@@ -624,7 +624,7 @@ stages:
             ${{ variables.devopsApprovers }},
             ${{ variables.qeApprovers }}
       - job: prodfix_deploy
-        displayName: "Post-Release Deploy to prodfix"
+        displayName: "Post-Release Deploy to prodfix-01"
         dependsOn: prodfix_approval
         condition: succeeded('prodfix_approval')
         pool: { name: $(poolName), demands: azureps }
@@ -656,9 +656,9 @@ stages:
                 pipelineId: '$(pipelineBuildId)'
                 artifactName: '$(artifactName)'
                 itemPattern: '**'
-                targetPath: '$(downloadedArtifacts)/prodfix'
+                targetPath: '$(downloadedArtifacts)/prodfix-01'
           - pwsh: |
-              Write-Host "Artifact download complete for prodfix (deployment steps are commented out)"
+              Write-Host "Artifact download complete for prodfix-01 (deployment steps are commented out)"
             displayName: "Confirm artifact download"
           # - task: PowerShell@2
           #   name: buildAppSettings
@@ -668,7 +668,7 @@ stages:
           #     targetType: 'inline'
           #     script: |
           #       New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-          #       & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prodfix' -OutputPath '$(appSettingsFile)'
+          #       & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prodfix-01' -OutputPath '$(appSettingsFile)'
           #     failOnStderr: true
           #     showWarnings: true
           #     pwsh: true
@@ -679,7 +679,7 @@ stages:
           #   parameters:
           #     appSettingsPath: '$(appSettingsFile)'
           #     appName: '$(functionAppName)'
-          #     package: '$(downloadedArtifacts)/prodfix/**/*${{ parameters.artifactName }}*.zip'
+          #     package: '$(downloadedArtifacts)/prodfix-01/**/*${{ parameters.artifactName }}*.zip'
           #     serviceConnection: RxI-PRODFIX-05
           #     healthcheckEnabled: false
           #     functionAppDeployEnabled: ${{ parameters.deployCode }}
