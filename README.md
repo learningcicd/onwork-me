@@ -367,25 +367,9 @@ stages:
             displayName: "Break-Glass Approval"
 
 ################################################ START QE APPROVAL STAGE ################################################
-  - stage: QEFinalApproval
-    displayName: QE Review & Approval for Prod
-    dependsOn:
-      - deploy_stage_dev
-      - deploy_stage_e2e_01
-      - deploy_stage_e2e_02
-      - deploy_stage_perf_01
-      - deploy_stage_prodfix_01
-      - BreakGlassApproval
-    condition: |
-      or(
-        succeeded('deploy_stage_dev'),
-        succeeded('deploy_stage_e2e_01'),
-        succeeded('deploy_stage_e2e_02'),
-        succeeded('deploy_stage_perf_01'),
-        succeeded('deploy_stage_prodfix_01'),
-        succeeded('BreakGlassApproval')
-      )
-    isSkippable: false
+  - stage: ProdDiff
+    displayName: Prepare & Diff prod
+    dependsOn: []   # runs immediately at pipeline trigger, independent of nonprod
     variables:
       - name: prodFunctionAppName
         value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
@@ -415,7 +399,7 @@ stages:
             displayName: "Capture existing app settings (prod)"
             condition: eq(${{ parameters.deployAppSettings }}, true)
             inputs:
-              azureSubscription: rxi-prod05-Leap
+              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
               scriptType: pscore
               scriptLocation: inlineScript
               inlineScript: |
@@ -510,10 +494,34 @@ stages:
                 Write-Host ""
                 Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
 
+
+  - stage: QEFinalApproval
+    displayName: QE Review & Approval for Prod
+    dependsOn:
+      - ProdDiff
+      - deploy_stage_dev
+      - deploy_stage_e2e_01
+      - deploy_stage_e2e_02
+      - deploy_stage_perf_01
+      - deploy_stage_prodfix_01
+      - BreakGlassApproval
+    condition: |
+      and(
+        succeeded('ProdDiff'),
+        or(
+          succeeded('deploy_stage_dev'),
+          succeeded('deploy_stage_e2e_01'),
+          succeeded('deploy_stage_e2e_02'),
+          succeeded('deploy_stage_perf_01'),
+          succeeded('deploy_stage_prodfix_01'),
+          succeeded('BreakGlassApproval')
+        )
+      )
+    isSkippable: false
+    jobs:
       - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
         parameters:
           jobName: qe_final_approval
-          dependsOn: prepProdJob
           displayName: QE Review & Approval
           timeoutInMinutes: 10
           approvers: |
@@ -527,7 +535,7 @@ stages:
     condition: succeeded('QEFinalApproval')
     variables:
       - name: deployServiceConnection
-        value: "rxi-prod05-Leap"
+        value: "Rxi-prod05-static-ui-RxR-SCM"
       - name: functionAppName
         value: "TODO-rxr-rxi-prod-01-cus-fa-purchaseordermanagement"
       - name: appSettingsFile
@@ -598,7 +606,7 @@ stages:
           #     appName: '$(functionAppName)'
           #     package: '$(downloadedArtifacts)/prod/**/*${{ parameters.artifactName }}*.zip'
           #     # TODO: replace with the real prod service connection name (literal, not a variable)
-          #     serviceConnection: rxi-prod05-Leap
+          #     serviceConnection: Rxi-prod05-static-ui-RxR-SCM
           #     healthcheckEnabled: false
           #     functionAppDeployEnabled: ${{ parameters.deployCode }}
           #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
