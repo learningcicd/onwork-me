@@ -341,262 +341,6 @@ stages:
                   serviceConnection: RxI-PRODFIX-05
 ################################################ END NONPROD DEPLOYMENTS ################################################
 
-  - stage: ProdDiff
-    displayName: Prepare & Diff prod
-    dependsOn: []   # runs immediately at trigger, same as nonprod envs
-    variables:
-      - name: prodFunctionAppName
-        value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
-      - name: prodAppSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/app-settings.json'
-    jobs:
-      # ---- Prepare & Diff prod (same pattern as the QE gate stage) ----
-      - job: prepProdDiffJob
-        displayName: Prepare & Diff prod
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 60
-        steps:
-          - task: PowerShell@2
-            name: buildAppSettings
-            displayName: Build App Settings (prod)
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              script: |
-                New-Item -Path '$(prodAppSettingsFile)' -Value '' -Type File -Force
-                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prod' -OutputPath '$(prodAppSettingsFile)'
-              failOnStderr: true
-              showWarnings: true
-              pwsh: true
-          - task: AzureCLI@2
-            name: captureProdAppSettings
-            displayName: "Capture existing app settings (prod)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
-              scriptType: pscore
-              scriptLocation: inlineScript
-              inlineScript: |
-                $appName = "$(prodFunctionAppName)"
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json"
-                New-Item -Path $liveFile -ItemType File -Force | Out-Null
-                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
-                if (-not $rg) {
-                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
-                  '[]' | Set-Content -Path $liveFile
-                } else {
-                  Write-Host "Resource group: $rg"
-                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
-                }
-          - task: PowerShell@2
-            name: diffProdAppSettings
-            displayName: "Diff app settings: live vs new (prod)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              pwsh: true
-              script: |
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json"
-                $newFile  = "$(prodAppSettingsFile)"
-
-                function Read-Settings($path) {
-                  $map = @{}
-                  if (-not (Test-Path $path)) { return $map }
-                  $raw = Get-Content -Path $path -Raw
-                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
-                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
-                  foreach ($item in @($json)) {
-                    if ($null -eq $item) { continue }
-                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
-                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
-                  }
-                  return $map
-                }
-
-                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
-
-                function ValuesEqual($a, $b) {
-                  if ($a -eq $b) { return $true }
-                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
-                  $okA = [datetime]::TryParse($a, [ref]$da)
-                  $okB = [datetime]::TryParse($b, [ref]$db)
-                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
-                  return $false
-                }
-
-                $live = Read-Settings $liveFile
-                $new  = Read-Settings $newFile
-                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
-
-                $rows = foreach ($k in $allKeys) {
-                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
-                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
-                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
-                }
-
-                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
-                Write-Host ""
-                Write-Host "App settings diff for prod  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
-                Write-Host ""
-
-                function Show-Section($title, $items, $showValues) {
-                  Write-Host ""
-                  Write-Host "================ $title ================"
-                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
-                  if ($showValues) {
-                    $items | Sort-Object Setting |
-                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
-                      Out-String -Width 4096 | Write-Host
-                  } else {
-                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
-                  }
-                }
-
-                if (-not $rows) { Write-Host "No settings found to compare." }
-                else {
-                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
-                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
-                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
-                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
-                }
-
-                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
-                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
-                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                Write-Host ""
-                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
-
-  - stage: ProdfixDiff
-    displayName: Prepare & Diff prodfix-01
-    dependsOn: []   # runs immediately at trigger, same as nonprod envs
-    variables:
-      - name: deployServiceConnection
-        value: RxI-PRODFIX-05
-      - name: functionAppName
-        value: rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement
-      - name: appSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/app-settings.json'
-    jobs:
-      # ---- Prepare & Diff prodfix-01 (same pattern as prod) ----
-      - job: prepProdfixDiffJob
-        displayName: Prepare & Diff prodfix-01
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 60
-        steps:
-          - task: PowerShell@2
-            name: buildAppSettings
-            displayName: Build App Settings (prodfix-01)
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              script: |
-                New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prodfix-01' -OutputPath '$(appSettingsFile)'
-              failOnStderr: true
-              showWarnings: true
-              pwsh: true
-          - task: AzureCLI@2
-            name: captureProdfixAppSettings
-            displayName: "Capture existing app settings (prodfix-01)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              azureSubscription: RxI-PRODFIX-05
-              scriptType: pscore
-              scriptLocation: inlineScript
-              inlineScript: |
-                $appName = "$(functionAppName)"
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json"
-                New-Item -Path $liveFile -ItemType File -Force | Out-Null
-                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
-                if (-not $rg) {
-                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
-                  '[]' | Set-Content -Path $liveFile
-                } else {
-                  Write-Host "Resource group: $rg"
-                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
-                }
-          - task: PowerShell@2
-            name: diffProdfixAppSettings
-            displayName: "Diff app settings: live vs new (prodfix-01)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              pwsh: true
-              script: |
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json"
-                $newFile  = "$(appSettingsFile)"
-
-                function Read-Settings($path) {
-                  $map = @{}
-                  if (-not (Test-Path $path)) { return $map }
-                  $raw = Get-Content -Path $path -Raw
-                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
-                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
-                  foreach ($item in @($json)) {
-                    if ($null -eq $item) { continue }
-                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
-                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
-                  }
-                  return $map
-                }
-
-                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
-
-                function ValuesEqual($a, $b) {
-                  if ($a -eq $b) { return $true }
-                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
-                  $okA = [datetime]::TryParse($a, [ref]$da)
-                  $okB = [datetime]::TryParse($b, [ref]$db)
-                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
-                  return $false
-                }
-
-                $live = Read-Settings $liveFile
-                $new  = Read-Settings $newFile
-                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
-
-                $rows = foreach ($k in $allKeys) {
-                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
-                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
-                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
-                }
-
-                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
-                Write-Host ""
-                Write-Host "App settings diff for prodfix-01  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
-                Write-Host ""
-
-                function Show-Section($title, $items, $showValues) {
-                  Write-Host ""
-                  Write-Host "================ $title ================"
-                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
-                  if ($showValues) {
-                    $items | Sort-Object Setting |
-                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
-                      Out-String -Width 4096 | Write-Host
-                  } else {
-                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
-                  }
-                }
-
-                if (-not $rows) { Write-Host "No settings found to compare." }
-                else {
-                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
-                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
-                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
-                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
-                }
-
-                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
-                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
-                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                Write-Host ""
-                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
-
   - stage: BreakGlassApproval
     displayName: Break-Glass Approval
     dependsOn: []
@@ -782,7 +526,131 @@ stages:
         value: "rxr-rxi-prod-cus-fa-purchaseordermanagement"
       - name: appSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/app-settings.json'
+      # separate, real (non-TODO) values used only by the Prepare & Diff job below,
+      # so the diff works even while functionAppName above is still a placeholder
+      - name: prodFunctionAppName
+        value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
+      - name: prodAppSettingsFile
+        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/app-settings.json'
     jobs:
+      # ---- Prepare & Diff prod (same pattern as the QE gate stage) ----
+      - job: prepProdDiffJob
+        displayName: Prepare & Diff prod
+        pool: { name: $(poolName), demands: azureps }
+        timeoutInMinutes: 60
+        steps:
+          - task: PowerShell@2
+            name: buildAppSettings
+            displayName: Build App Settings (prod)
+            condition: eq(${{ parameters.deployAppSettings }}, true)
+            inputs:
+              targetType: 'inline'
+              script: |
+                New-Item -Path '$(prodAppSettingsFile)' -Value '' -Type File -Force
+                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prod' -OutputPath '$(prodAppSettingsFile)'
+              failOnStderr: true
+              showWarnings: true
+              pwsh: true
+          - task: AzureCLI@2
+            name: captureProdAppSettings
+            displayName: "Capture existing app settings (prod)"
+            condition: eq(${{ parameters.deployAppSettings }}, true)
+            inputs:
+              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $appName = "$(prodFunctionAppName)"
+                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json"
+                New-Item -Path $liveFile -ItemType File -Force | Out-Null
+                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
+                if (-not $rg) {
+                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
+                  '[]' | Set-Content -Path $liveFile
+                } else {
+                  Write-Host "Resource group: $rg"
+                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
+                }
+          - task: PowerShell@2
+            name: diffProdAppSettings
+            displayName: "Diff app settings: live vs new (prod)"
+            condition: eq(${{ parameters.deployAppSettings }}, true)
+            inputs:
+              targetType: 'inline'
+              pwsh: true
+              script: |
+                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json"
+                $newFile  = "$(prodAppSettingsFile)"
+
+                function Read-Settings($path) {
+                  $map = @{}
+                  if (-not (Test-Path $path)) { return $map }
+                  $raw = Get-Content -Path $path -Raw
+                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
+                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
+                  foreach ($item in @($json)) {
+                    if ($null -eq $item) { continue }
+                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
+                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
+                  }
+                  return $map
+                }
+
+                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
+
+                function ValuesEqual($a, $b) {
+                  if ($a -eq $b) { return $true }
+                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
+                  $okA = [datetime]::TryParse($a, [ref]$da)
+                  $okB = [datetime]::TryParse($b, [ref]$db)
+                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
+                  return $false
+                }
+
+                $live = Read-Settings $liveFile
+                $new  = Read-Settings $newFile
+                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
+
+                $rows = foreach ($k in $allKeys) {
+                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
+                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
+                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
+                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
+                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
+                }
+
+                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
+                Write-Host ""
+                Write-Host "App settings diff for prod  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
+                Write-Host ""
+
+                function Show-Section($title, $items, $showValues) {
+                  Write-Host ""
+                  Write-Host "================ $title ================"
+                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
+                  if ($showValues) {
+                    $items | Sort-Object Setting |
+                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
+                      Out-String -Width 4096 | Write-Host
+                  } else {
+                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
+                  }
+                }
+
+                if (-not $rows) { Write-Host "No settings found to compare." }
+                else {
+                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
+                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
+                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
+                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
+                }
+
+                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
+                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
+                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
+                Write-Host ""
+                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
+
       - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
         parameters:
           jobName: prod_approval
@@ -865,6 +733,124 @@ stages:
       - name: appSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/app-settings.json'
     jobs:
+      # ---- Prepare & Diff prodfix-01 (same pattern as prod) ----
+      - job: prepProdfixDiffJob
+        displayName: Prepare & Diff prodfix-01
+        pool: { name: $(poolName), demands: azureps }
+        timeoutInMinutes: 60
+        steps:
+          - task: PowerShell@2
+            name: buildAppSettings
+            displayName: Build App Settings (prodfix-01)
+            condition: eq(${{ parameters.deployAppSettings }}, true)
+            inputs:
+              targetType: 'inline'
+              script: |
+                New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
+                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prodfix-01' -OutputPath '$(appSettingsFile)'
+              failOnStderr: true
+              showWarnings: true
+              pwsh: true
+          - task: AzureCLI@2
+            name: captureProdfixAppSettings
+            displayName: "Capture existing app settings (prodfix-01)"
+            condition: eq(${{ parameters.deployAppSettings }}, true)
+            inputs:
+              azureSubscription: RxI-PRODFIX-05
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $appName = "$(functionAppName)"
+                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json"
+                New-Item -Path $liveFile -ItemType File -Force | Out-Null
+                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
+                if (-not $rg) {
+                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
+                  '[]' | Set-Content -Path $liveFile
+                } else {
+                  Write-Host "Resource group: $rg"
+                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
+                }
+          - task: PowerShell@2
+            name: diffProdfixAppSettings
+            displayName: "Diff app settings: live vs new (prodfix-01)"
+            condition: eq(${{ parameters.deployAppSettings }}, true)
+            inputs:
+              targetType: 'inline'
+              pwsh: true
+              script: |
+                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json"
+                $newFile  = "$(appSettingsFile)"
+
+                function Read-Settings($path) {
+                  $map = @{}
+                  if (-not (Test-Path $path)) { return $map }
+                  $raw = Get-Content -Path $path -Raw
+                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
+                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
+                  foreach ($item in @($json)) {
+                    if ($null -eq $item) { continue }
+                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
+                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
+                  }
+                  return $map
+                }
+
+                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
+
+                function ValuesEqual($a, $b) {
+                  if ($a -eq $b) { return $true }
+                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
+                  $okA = [datetime]::TryParse($a, [ref]$da)
+                  $okB = [datetime]::TryParse($b, [ref]$db)
+                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
+                  return $false
+                }
+
+                $live = Read-Settings $liveFile
+                $new  = Read-Settings $newFile
+                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
+
+                $rows = foreach ($k in $allKeys) {
+                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
+                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
+                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
+                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
+                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
+                }
+
+                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
+                Write-Host ""
+                Write-Host "App settings diff for prodfix-01  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
+                Write-Host ""
+
+                function Show-Section($title, $items, $showValues) {
+                  Write-Host ""
+                  Write-Host "================ $title ================"
+                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
+                  if ($showValues) {
+                    $items | Sort-Object Setting |
+                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
+                      Out-String -Width 4096 | Write-Host
+                  } else {
+                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
+                  }
+                }
+
+                if (-not $rows) { Write-Host "No settings found to compare." }
+                else {
+                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
+                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
+                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
+                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
+                }
+
+                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
+                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
+                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
+                Write-Host ""
+                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
+
       - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
         parameters:
           jobName: prodfix_approval
