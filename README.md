@@ -5,10 +5,6 @@ trigger: none
 appendCommitMessageToRunName: false
 
 parameters:
-  - name: branchName
-    displayName: Branch Name
-    type: string
-    default: 'heads/develop'
   - name: artifactName
     displayName: Artifact Name
     type: string
@@ -129,7 +125,6 @@ stages:
                   project: '$(buildPipelineProject)'
                   definition: '$(buildPipelineDefinition)'
                   buildVersionToDownload: 'specific'
-                  branchName: 'refs/${{ parameters.branchName }}'
                   pipelineId: '$(pipelineBuildId)'
                   artifactName: '$(artifactName)'
                   itemPattern: '**'
@@ -310,7 +305,6 @@ stages:
                   project: '$(buildPipelineProject)'
                   definition: '$(buildPipelineDefinition)'
                   buildVersionToDownload: 'specific'
-                  branchName: 'refs/${{ parameters.branchName }}'
                   pipelineId: '$(pipelineBuildId)'
                   artifactName: '$(artifactName)'
                   itemPattern: '**'
@@ -692,7 +686,6 @@ stages:
                 project: '$(buildPipelineProject)'
                 definition: '$(buildPipelineDefinition)'
                 buildVersionToDownload: 'specific'
-                branchName: 'refs/${{ parameters.branchName }}'
                 pipelineId: '$(pipelineBuildId)'
                 artifactName: '$(artifactName)'
                 itemPattern: '**'
@@ -892,7 +885,6 @@ stages:
                 project: '$(buildPipelineProject)'
                 definition: '$(buildPipelineDefinition)'
                 buildVersionToDownload: 'specific'
-                branchName: 'refs/${{ parameters.branchName }}'
                 pipelineId: '$(pipelineBuildId)'
                 artifactName: '$(artifactName)'
                 itemPattern: '**'
