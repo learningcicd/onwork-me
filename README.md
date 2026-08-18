@@ -1,899 +1,140 @@
 {% raw %}
 ```yaml
-trigger: none
 
-appendCommitMessageToRunName: false
-
-parameters:
-  - name: artifactName
-    displayName: Artifact Name
-    type: string
-    default: ''
-  - name: deployCode
-    displayName: Deploy Code
-    type: boolean
-    default: true
-  - name: deployAppSettings
-    displayName: Deploy App Settings
-    type: boolean
-    default: true
-
-variables:
-  - name: buildPipelineProject
-    value: '0bf1e934-99c7-462b-9e57-953979618cee'
-  - name: buildPipelineDefinition
-    value: '5544'
-  - name: downloadedArtifacts
-    value: '$(Pipeline.Workspace)/artifacts'
-  - name: artifactName
-    value: 'RxInventory.PurchaseOrderManagement'
-  - name: envs
-    value: "dev,e2e-01,e2e-02,perf-01,prodfix-01"
-  - name: devopsApprovers
-    value: "[RxI-DevOps-Deployment]\\RxI DevOps - Team"
-  - name: deployApprovers
-    value: "[RxI-DevOps-Deployment]\\rxireldeployment - Team"
-  - name: qeApprovers
-    value: "[RxI-DevOps-Deployment]\\RxI QE - US Team"
-  - name: testingStageApprovers
-    value: "[RxI-DevOps-Deployment]\\Testing Stage Approvers"
-  - name: breakGlassApprovers
-    value: "[RxI-DevOps-Deployment]\\Break Glass Approvers"
-  - name: poolName
-    value: "rxi-agent-pool"
-
-pool:
-  name: rxi-agent-pool
-  demands:
-    - azureps
-
-resources:
-  repositories:
-    - repository: pipelineTemplate
-      type: git
-      name: PlatformX-Toolchain/pipeline-templates
-      ref: refs/heads/master
-    - repository: rxiPipelineTemplate
-      type: git
-      name: RxI-DevOps-Deployment/rxi-cd-templates
-      ref: refs/tags/jobs/1.2.1
-
-stages:
-################################################ START NONPROD DEPLOYMENTS ################################################
-
-  - ${{ each env in split(variables.envs, ',') }}:
-    - stage: deploy_stage_${{ replace(env, '-', '_') }}
-      displayName: "${{ env }}"
-      dependsOn: []
-      isSkippable: false
-      variables:
-        - name: displayEnv
-          value: ${{ replace(env, '-', '_') }}
-        - name: deployServiceConnection
-          value: RxI-NProd-05   # single non-prod subscription, shared by all nonprod envs
-        - ${{ if eq(env, 'dev') }}:
-          - name: functionAppName
-            value: rxr-rxi-dev-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'e2e-01') }}:
-          - name: functionAppName
-            value: rxr-rxi-e2e-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'e2e-02') }}:
-          - name: functionAppName
-            value: rxr-rxi-e2e-02-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'perf-01') }}:
-          - name: functionAppName
-            value: rxr-rxi-perf-01-cus-fa-purchaseordermanagement
-        - ${{ if eq(env, 'prodfix-01') }}:
-          - name: functionAppName
-            value: rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement
-        - name: appSettingsFile
-          value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/app-settings.json'
-      jobs:
-        # ---- Prep job: download artifact, capture live settings, build new, diff (table) ----
-        # runs immediately - no approval needed to prepare & show the diff
-        - job: prepJob
-          displayName: Prepare & Diff ${{ env }}
-          pool: { name: $(poolName), demands: azureps }
-          timeoutInMinutes: 60
-          steps:
-            - ${{ if eq(parameters.deployCode, true) }}:
-              - task: PowerShell@2
-                displayName: Normalize version metadata
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    $versionParts = '${{ parameters.artifactName }}' -split '\-b'
-                    $buildId = ($versionParts[-1] -replace '[^0-9]', '')
-                    if (-not $buildId) { Write-Host "##vso[task.logissue type=error]Could not parse build id from artifact name '${{ parameters.artifactName }}' - expected format <name>-b<buildId>"; exit 1 }
-                    Write-Host "Code Version: $($versionParts[0])"
-                    Write-Host "Pipeline BuildId: $buildId"
-                    Write-Host "##vso[task.setvariable variable=pipelineBuildId]$buildId"
-                  failOnStderr: true
-                  pwsh: true
-                  runScriptInSeparateScope: true
-              - task: DownloadPipelineArtifact@2
-                inputs:
-                  buildType: 'specific'
-                  project: '$(buildPipelineProject)'
-                  definition: '$(buildPipelineDefinition)'
-                  buildVersionToDownload: 'specific'
-                  pipelineId: '$(pipelineBuildId)'
-                  artifactName: '$(artifactName)'
-                  itemPattern: '**'
-                  targetPath: '$(downloadedArtifacts)/${{ env }}'
-            # STEP 1: capture live (pre-deploy) settings; write to file for the diff
-            - task: AzureCLI@2
-              name: captureAppSettings
-              displayName: "Capture existing app settings (${{ env }})"
-              inputs:
-                azureSubscription: RxI-NProd-05   # single non-prod subscription, shared by all nonprod envs
-                scriptType: pscore
-                scriptLocation: inlineScript
-                inlineScript: |
-                  $appName = "$(functionAppName)"
-                  $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/live-app-settings.json"
-                  New-Item -Path $liveFile -ItemType File -Force | Out-Null
-                  $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
-                  if (-not $rg) {
-                    Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
-                    '[]' | Set-Content -Path $liveFile
-                  } else {
-                    Write-Host "Resource group: $rg"
-                    az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
-                  }
-            # STEP 2: build the new app settings file we intend to deploy
-            - task: PowerShell@2
-              name: buildAppSettings
-              displayName: Build App Settings
-              condition: eq(${{ parameters.deployAppSettings }}, true)
-              inputs:
-                targetType: 'inline'
-                script: |
-                  New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-                  & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName '${{ env }}' -OutputPath '$(appSettingsFile)'
-                failOnStderr: true
-                showWarnings: true
-                pwsh: true
-            # STEP 3: diff live vs new, rendered as an aligned TABLE in the log
-            - task: PowerShell@2
-              name: diffAppSettings
-              displayName: "Diff app settings: live vs new (${{ env }})"
-              condition: eq(${{ parameters.deployAppSettings }}, true)
-              inputs:
-                targetType: 'inline'
-                pwsh: true
-                script: |
-                  $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/live-app-settings.json"
-                  $newFile  = "$(appSettingsFile)"
-
-                  function Read-Settings($path) {
-                    $map = @{}
-                    if (-not (Test-Path $path)) { return $map }
-                    $raw = Get-Content -Path $path -Raw
-                    if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
-                    try { $json = $raw | ConvertFrom-Json } catch { return $map }
-                    foreach ($item in @($json)) {
-                      if ($null -eq $item) { continue }
-                      if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
-                      else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
-                    }
-                    return $map
-                  }
-
-                  function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
-
-                  # Treat two values as equal if their strings match OR they parse to the same date/time.
-                  # This avoids false CHANGED rows when only the timestamp FORMAT differs
-                  # (e.g. '08/28/2023 00:00:00' vs '2023-08-28T00:00:00.000Z') - Azure normalizes
-                  # the format on deploy, so the value is effectively unchanged.
-                  function ValuesEqual($a, $b) {
-                    if ($a -eq $b) { return $true }
-                    $da = [datetime]::MinValue; $db = [datetime]::MinValue
-                    $okA = [datetime]::TryParse($a, [ref]$da)
-                    $okB = [datetime]::TryParse($b, [ref]$db)
-                    if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
-                    return $false
-                  }
-
-                  $live = Read-Settings $liveFile
-                  $new  = Read-Settings $newFile
-                  $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
-
-                  $rows = foreach ($k in $allKeys) {
-                    $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
-                    if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                    elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                    elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
-                    elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
-                  }
-
-                  Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
-                  Write-Host ""
-                  Write-Host "App settings diff for ${{ env }}  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
-                  Write-Host ""
-
-                  function Show-Section($title, $items, $showValues) {
-                    Write-Host ""
-                    Write-Host "================ $title ================"
-                    if (-not $items -or @($items).Count -eq 0) {
-                      Write-Host "(none)"
-                      return
-                    }
-                    if ($showValues) {
-                      $items | Sort-Object Setting |
-                        Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
-                        Out-String -Width 4096 | Write-Host
-                    } else {
-                      # values are secrets - show setting names only
-                      $items | Sort-Object Setting |
-                        Format-Table -AutoSize Setting |
-                        Out-String -Width 4096 | Write-Host
-                    }
-                  }
-
-                  if (-not $rows) { Write-Host "No settings found to compare." }
-                  else {
-                    Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
-                    Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
-                    Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
-                    Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
-                  }
-
-                  $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
-                  $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
-                  $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                  Write-Host ""
-                  Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
-
-        # ---- Single approval gate: review the diff above, then approve to deploy ----
-        - job: diffApprovalJob
-          dependsOn: prepJob
-          displayName: Approve deploy after diff review (${{ env }})
-          pool: server   # agentless - required for ManualValidation
-          timeoutInMinutes: 60   # must be > the task timeout below (MS docs); task timeout is the real limit
-          steps:
-            - task: ManualValidation@0
-              timeoutInMinutes: 2   # gate auto-rejects after 2 minutes
-              inputs:
-                notifyUsers: |
-                  ${{ variables.testingStageApprovers }}
-                instructions: "Artifact: ${{ parameters.artifactName }} | Env: ${{ env }}. Review the app settings diff in the 'Prepare & Diff' job log, then approve to deploy."
-                onTimeout: 'reject'
-
-        # ---- Deploy job: runs only after the diff has been approved ----
-        - job: deployJob
-          dependsOn: diffApprovalJob
-          condition: succeeded('diffApprovalJob')
-          displayName: Deploy ${{ env }}
-          pool: { name: $(poolName), demands: azureps }
-          timeoutInMinutes: 190
-          steps:
-            # re-establish version metadata + artifact in this job's workspace
-            - ${{ if eq(parameters.deployCode, true) }}:
-              - task: PowerShell@2
-                displayName: Normalize version metadata
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    $versionParts = '${{ parameters.artifactName }}' -split '\-b'
-                    $buildId = ($versionParts[-1] -replace '[^0-9]', '')
-                    if (-not $buildId) { Write-Host "##vso[task.logissue type=error]Could not parse build id from artifact name '${{ parameters.artifactName }}'"; exit 1 }
-                    Write-Host "##vso[task.setvariable variable=pipelineBuildId]$buildId"
-                  failOnStderr: true
-                  pwsh: true
-                  runScriptInSeparateScope: true
-              - task: DownloadPipelineArtifact@2
-                inputs:
-                  buildType: 'specific'
-                  project: '$(buildPipelineProject)'
-                  definition: '$(buildPipelineDefinition)'
-                  buildVersionToDownload: 'specific'
-                  pipelineId: '$(pipelineBuildId)'
-                  artifactName: '$(artifactName)'
-                  itemPattern: '**'
-                  targetPath: '$(downloadedArtifacts)/${{ env }}'
-            - task: PowerShell@2
-              name: buildAppSettings
-              displayName: Build App Settings
-              condition: eq(${{ parameters.deployAppSettings }}, true)
-              inputs:
-                targetType: 'inline'
-                script: |
-                  New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-                  & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName '${{ env }}' -OutputPath '$(appSettingsFile)'
-                failOnStderr: true
-                showWarnings: true
-                pwsh: true
-            - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
-              parameters:
-                appSettingsPath: '$(appSettingsFile)'
-                appName: '$(functionAppName)'
-                package: '$(downloadedArtifacts)/${{ env }}/**/*${{ parameters.artifactName }}*.zip'
-                serviceConnection: RxI-NProd-05   # single non-prod subscription, shared by all nonprod envs
-                healthcheckEnabled: false
-                functionAppDeployEnabled: ${{ parameters.deployCode }}
-                functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
-################################################ END NONPROD DEPLOYMENTS ################################################
-
-  - stage: BreakGlassApproval
-    displayName: Break-Glass Approval
-    dependsOn: []
-    isSkippable: false
-    jobs:
-      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-        parameters:
-          jobName: approvalJob
-          timeoutInMinutes: 10
-          approvers: |
-            ${{ variables.breakGlassApprovers }}
-      - job: BreakGlassApproval
-        dependsOn: approvalJob
-        pool: { name: $(poolName) }
-        steps:
-          - pwsh: |
-              Write-Host "Break-Glass approval granted!"
-            displayName: "Break-Glass Approval"
-
-################################################ START QE APPROVAL STAGE (now also owns Prepare & Diff prod) ################################################
-  - stage: QEFinalApproval
-    displayName: QE Review & Approval for Prod
-    dependsOn:
-      - deploy_stage_dev
-      - deploy_stage_e2e_01
-      - deploy_stage_e2e_02
-      - deploy_stage_perf_01
-      - deploy_stage_prodfix_01
-      - BreakGlassApproval
-    condition: |
-      or(
-        succeeded('deploy_stage_dev'),
-        succeeded('deploy_stage_e2e_01'),
-        succeeded('deploy_stage_e2e_02'),
-        succeeded('deploy_stage_perf_01'),
-        succeeded('deploy_stage_prodfix_01'),
-        succeeded('BreakGlassApproval')
-      )
-    isSkippable: false
-    variables:
-      - name: prodFunctionAppName
-        value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
-      - name: prodAppSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/app-settings.json'
-    jobs:
-      # ---- Prepare & Diff for prod now runs INSIDE the QE gate stage ----
-      - job: prepProdJob
-        displayName: Prepare & Diff prod
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 60
-        steps:
-          - task: PowerShell@2
-            name: buildAppSettings
-            displayName: Build App Settings (prod)
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              script: |
-                New-Item -Path '$(prodAppSettingsFile)' -Value '' -Type File -Force
-                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prod' -OutputPath '$(prodAppSettingsFile)'
-              failOnStderr: true
-              showWarnings: true
-              pwsh: true
-          - task: AzureCLI@2
-            name: captureProdAppSettings
-            displayName: "Capture existing app settings (prod)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
-              scriptType: pscore
-              scriptLocation: inlineScript
-              inlineScript: |
-                $appName = "$(prodFunctionAppName)"
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/live-app-settings.json"
-                New-Item -Path $liveFile -ItemType File -Force | Out-Null
-                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
-                if (-not $rg) {
-                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
-                  '[]' | Set-Content -Path $liveFile
-                } else {
-                  Write-Host "Resource group: $rg"
-                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
-                }
-          - task: PowerShell@2
-            name: diffProdAppSettings
-            displayName: "Diff app settings: live vs new (prod)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              pwsh: true
-              script: |
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/live-app-settings.json"
-                $newFile  = "$(prodAppSettingsFile)"
-
-                function Read-Settings($path) {
-                  $map = @{}
-                  if (-not (Test-Path $path)) { return $map }
-                  $raw = Get-Content -Path $path -Raw
-                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
-                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
-                  foreach ($item in @($json)) {
-                    if ($null -eq $item) { continue }
-                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
-                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
-                  }
-                  return $map
-                }
-
-                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
-
-                function ValuesEqual($a, $b) {
-                  if ($a -eq $b) { return $true }
-                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
-                  $okA = [datetime]::TryParse($a, [ref]$da)
-                  $okB = [datetime]::TryParse($b, [ref]$db)
-                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
-                  return $false
-                }
-
-                $live = Read-Settings $liveFile
-                $new  = Read-Settings $newFile
-                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
-
-                $rows = foreach ($k in $allKeys) {
-                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
-                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
-                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
-                }
-
-                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
-                Write-Host ""
-                Write-Host "App settings diff for prod  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
-                Write-Host ""
-
-                function Show-Section($title, $items, $showValues) {
-                  Write-Host ""
-                  Write-Host "================ $title ================"
-                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
-                  if ($showValues) {
-                    $items | Sort-Object Setting |
-                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
-                      Out-String -Width 4096 | Write-Host
-                  } else {
-                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
-                  }
-                }
-
-                if (-not $rows) { Write-Host "No settings found to compare." }
-                else {
-                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
-                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
-                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
-                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
-                }
-
-                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
-                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
-                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                Write-Host ""
-                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
-
-      # ---- QE approval now gated on the prod diff above, within the same stage ----
-      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-        parameters:
-          jobName: qe_final_approval
-          displayName: QE Review & Approval
-          timeoutInMinutes: 10
-          approvers: |
-            ${{ variables.deployApprovers }},
-            ${{ variables.qeApprovers }}
-################################################ END QE APPROVAL STAGE ################################################
-################################################ START PROD DEPLOYMENT STAGE ################################################
-  - stage: DeployToProd
-    displayName: Deploy to Prod
-    dependsOn: QEFinalApproval
-    condition: succeeded('QEFinalApproval')
-    variables:
-      - name: deployServiceConnection
-        value: "Rxi-prod05-static-ui-RxR-SCM"
-      - name: functionAppName
-        value: "rxr-rxi-prod-cus-fa-purchaseordermanagement"
-      - name: appSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/app-settings.json'
-      # separate, real (non-TODO) values used only by the Prepare & Diff job below,
-      # so the diff works even while functionAppName above is still a placeholder
-      - name: prodFunctionAppName
-        value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
-      - name: prodAppSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/app-settings.json'
-    jobs:
-      # ---- Prepare & Diff prod (same pattern as the QE gate stage) ----
-      - job: prepProdDiffJob
-        displayName: Prepare & Diff prod
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 60
-        steps:
-          - task: PowerShell@2
-            name: buildAppSettings
-            displayName: Build App Settings (prod)
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              script: |
-                New-Item -Path '$(prodAppSettingsFile)' -Value '' -Type File -Force
-                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prod' -OutputPath '$(prodAppSettingsFile)'
-              failOnStderr: true
-              showWarnings: true
-              pwsh: true
-          - task: AzureCLI@2
-            name: captureProdAppSettings
-            displayName: "Capture existing app settings (prod)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
-              scriptType: pscore
-              scriptLocation: inlineScript
-              inlineScript: |
-                $appName = "$(prodFunctionAppName)"
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json"
-                New-Item -Path $liveFile -ItemType File -Force | Out-Null
-                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
-                if (-not $rg) {
-                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
-                  '[]' | Set-Content -Path $liveFile
-                } else {
-                  Write-Host "Resource group: $rg"
-                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
-                }
-          - task: PowerShell@2
-            name: diffProdAppSettings
-            displayName: "Diff app settings: live vs new (prod)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              pwsh: true
-              script: |
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json"
-                $newFile  = "$(prodAppSettingsFile)"
-
-                function Read-Settings($path) {
-                  $map = @{}
-                  if (-not (Test-Path $path)) { return $map }
-                  $raw = Get-Content -Path $path -Raw
-                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
-                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
-                  foreach ($item in @($json)) {
-                    if ($null -eq $item) { continue }
-                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
-                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
-                  }
-                  return $map
-                }
-
-                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
-
-                function ValuesEqual($a, $b) {
-                  if ($a -eq $b) { return $true }
-                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
-                  $okA = [datetime]::TryParse($a, [ref]$da)
-                  $okB = [datetime]::TryParse($b, [ref]$db)
-                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
-                  return $false
-                }
-
-                $live = Read-Settings $liveFile
-                $new  = Read-Settings $newFile
-                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
-
-                $rows = foreach ($k in $allKeys) {
-                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
-                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
-                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
-                }
-
-                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
-                Write-Host ""
-                Write-Host "App settings diff for prod  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
-                Write-Host ""
-
-                function Show-Section($title, $items, $showValues) {
-                  Write-Host ""
-                  Write-Host "================ $title ================"
-                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
-                  if ($showValues) {
-                    $items | Sort-Object Setting |
-                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
-                      Out-String -Width 4096 | Write-Host
-                  } else {
-                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
-                  }
-                }
-
-                if (-not $rows) { Write-Host "No settings found to compare." }
-                else {
-                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
-                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
-                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
-                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
-                }
-
-                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
-                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
-                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                Write-Host ""
-                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
-
-      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-        parameters:
-          jobName: prod_approval
-          displayName: Approve Prod Deploy
-          timeoutInMinutes: 10
-          approvers: |
-            ${{ variables.deployApprovers }}
-      - job: prod_deploy
-        displayName: Run Prod Deployment
-        dependsOn: prod_approval
-        condition: succeeded('prod_approval')
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 190
-        steps:
-          - ${{ if eq(parameters.deployCode, true) }}:
-            - task: PowerShell@2
-              displayName: Normalize version metadata
-              inputs:
-                targetType: 'inline'
-                script: |
-                  $versionParts = '${{ parameters.artifactName }}' -split '\-b'
-                  # strip any non-numeric suffix (e.g. a pasted .zip extension) from the build id
-                  $buildId = ($versionParts[-1] -replace '[^0-9]', '')
-                  if (-not $buildId) { Write-Host "##vso[task.logissue type=error]Could not parse build id from artifact name '${{ parameters.artifactName }}' - expected format <name>-b<buildId>"; exit 1 }
-                  Write-Host "Code Version: $($versionParts[0])"
-                  Write-Host "Pipeline BuildId: $buildId"
-                  Write-Host "##vso[task.setvariable variable=pipelineBuildId]$buildId"
-                failOnStderr: true
-                pwsh: true
-                runScriptInSeparateScope: true
-            - task: DownloadPipelineArtifact@2
-              inputs:
-                buildType: 'specific'
-                project: '$(buildPipelineProject)'
-                definition: '$(buildPipelineDefinition)'
-                buildVersionToDownload: 'specific'
-                pipelineId: '$(pipelineBuildId)'
-                artifactName: '$(artifactName)'
-                itemPattern: '**'
-                targetPath: '$(downloadedArtifacts)/prod'
-          - pwsh: |
-              Write-Host "Artifact download complete for prod (deployment steps are commented out)"
-            displayName: "Confirm artifact download"
-          # - task: PowerShell@2
-          #   name: buildAppSettings
-          #   displayName: Build App Settings
-          #   condition: eq(${{ parameters.deployAppSettings }}, true)
-          #   inputs:
-          #     targetType: 'inline'
-          #     script: |
-          #       New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-          #       & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prod' -OutputPath '$(appSettingsFile)'
-          #     failOnStderr: true
-          #     showWarnings: true
-          #     pwsh: true
-          # NOTE: serviceConnection below is already a compile-time literal -
-          #       do NOT change it back to '$(deployServiceConnection)', a runtime
-          #       macro cannot be resolved or authorized by Azure DevOps.
-          # - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
-          #   parameters:
-          #     appSettingsPath: '$(appSettingsFile)'
-          #     appName: '$(functionAppName)'
-          #     package: '$(downloadedArtifacts)/prod/**/*${{ parameters.artifactName }}*.zip'
-          #     # TODO: replace with the real prod service connection name (literal, not a variable)
-          #     serviceConnection: Rxi-prod05-static-ui-RxR-SCM
-          #     healthcheckEnabled: false
-          #     functionAppDeployEnabled: ${{ parameters.deployCode }}
-          #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
-################################################ END PROD DEPLOYMENT STAGE ################################################
-################################################ START PRODFIX DEPLOYMENT STAGES ################################################
-  - stage: post_deploy_stage_prodfix_01
-    displayName: "Deploy to prodfix-01"
-    dependsOn: DeployToProd
-    condition: succeeded('DeployToProd')
-    variables:
-      - name: deployServiceConnection
-        value: RxI-PRODFIX-05
-      - name: functionAppName
-        value: rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement
-      - name: appSettingsFile
-        value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/app-settings.json'
-    jobs:
-      # ---- Prepare & Diff prodfix-01 (same pattern as prod) ----
-      - job: prepProdfixDiffJob
-        displayName: Prepare & Diff prodfix-01
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 60
-        steps:
-          - task: PowerShell@2
-            name: buildAppSettings
-            displayName: Build App Settings (prodfix-01)
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              script: |
-                New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-                & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prodfix-01' -OutputPath '$(appSettingsFile)'
-              failOnStderr: true
-              showWarnings: true
-              pwsh: true
-          - task: AzureCLI@2
-            name: captureProdfixAppSettings
-            displayName: "Capture existing app settings (prodfix-01)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              azureSubscription: RxI-PRODFIX-05
-              scriptType: pscore
-              scriptLocation: inlineScript
-              inlineScript: |
-                $appName = "$(functionAppName)"
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json"
-                New-Item -Path $liveFile -ItemType File -Force | Out-Null
-                $rg = az functionapp list --query "[?name=='$appName'].resourceGroup | [0]" -o tsv
-                if (-not $rg) {
-                  Write-Host "##vso[task.logissue type=warning]Could not locate function app '$appName' in this subscription; skipping snapshot."
-                  '[]' | Set-Content -Path $liveFile
-                } else {
-                  Write-Host "Resource group: $rg"
-                  az functionapp config appsettings list --name $appName --resource-group $rg --output json | Set-Content -Path $liveFile
-                }
-          - task: PowerShell@2
-            name: diffProdfixAppSettings
-            displayName: "Diff app settings: live vs new (prodfix-01)"
-            condition: eq(${{ parameters.deployAppSettings }}, true)
-            inputs:
-              targetType: 'inline'
-              pwsh: true
-              script: |
-                $liveFile = "$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json"
-                $newFile  = "$(appSettingsFile)"
-
-                function Read-Settings($path) {
-                  $map = @{}
-                  if (-not (Test-Path $path)) { return $map }
-                  $raw = Get-Content -Path $path -Raw
-                  if ([string]::IsNullOrWhiteSpace($raw)) { return $map }
-                  try { $json = $raw | ConvertFrom-Json } catch { return $map }
-                  foreach ($item in @($json)) {
-                    if ($null -eq $item) { continue }
-                    if ($item.PSObject.Properties.Name -contains 'name') { $map[$item.name] = "$($item.value)" }
-                    else { foreach ($prop in $item.PSObject.Properties) { $map[$prop.Name] = "$($prop.Value)" } }
-                  }
-                  return $map
-                }
-
-                function Truncate($s, $n) { if ($null -eq $s) { return '' }; if ($s.Length -le $n) { return $s }; return $s.Substring(0, $n-3) + '...' }
-
-                function ValuesEqual($a, $b) {
-                  if ($a -eq $b) { return $true }
-                  $da = [datetime]::MinValue; $db = [datetime]::MinValue
-                  $okA = [datetime]::TryParse($a, [ref]$da)
-                  $okB = [datetime]::TryParse($b, [ref]$db)
-                  if ($okA -and $okB) { return ($da.ToUniversalTime() -eq $db.ToUniversalTime()) }
-                  return $false
-                }
-
-                $live = Read-Settings $liveFile
-                $new  = Read-Settings $newFile
-                $allKeys = ($live.Keys + $new.Keys) | Sort-Object -Unique
-
-                $rows = foreach ($k in $allKeys) {
-                  $inLive = $live.ContainsKey($k); $inNew = $new.ContainsKey($k)
-                  if     (-not $inLive -and $inNew)            { [pscustomobject]@{ Action='ADDED';     Setting=$k; OldValue='';                       NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inNew -and -not (ValuesEqual $live[$k] $new[$k])) { [pscustomobject]@{ Action='CHANGED';   Setting=$k; OldValue=(Truncate $live[$k] 45);  NewValue=(Truncate $new[$k] 45) } }
-                  elseif ($inLive -and $inNew)                 { [pscustomobject]@{ Action='UNCHANGED'; Setting=$k; OldValue='';  NewValue='' } }
-                  elseif ($inLive -and -not $inNew)            { [pscustomobject]@{ Action='LIVE-ONLY'; Setting=$k; OldValue='';  NewValue='' } }
-                }
-
-                Write-Host "Version To Be Deployed: ${{ parameters.artifactName }}"
-                Write-Host ""
-                Write-Host "App settings diff for prodfix-01  (deploy MERGES: LIVE-ONLY rows are left untouched, nothing is deleted)"
-                Write-Host ""
-
-                function Show-Section($title, $items, $showValues) {
-                  Write-Host ""
-                  Write-Host "================ $title ================"
-                  if (-not $items -or @($items).Count -eq 0) { Write-Host "(none)"; return }
-                  if ($showValues) {
-                    $items | Sort-Object Setting |
-                      Format-Table -AutoSize Setting, @{Name='ExistingValue';Expression={$_.OldValue}}, @{Name='DesiredValue';Expression={$_.NewValue}} |
-                      Out-String -Width 4096 | Write-Host
-                  } else {
-                    $items | Sort-Object Setting | Format-Table -AutoSize Setting | Out-String -Width 4096 | Write-Host
-                  }
-                }
-
-                if (-not $rows) { Write-Host "No settings found to compare." }
-                else {
-                  Show-Section "CHANGED"   @($rows | Where-Object { $_.Action -eq 'CHANGED' })   $true
-                  Show-Section "ADDED"     @($rows | Where-Object { $_.Action -eq 'ADDED' })     $true
-                  Show-Section "LIVE-ONLY" @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }) $false
-                  Show-Section "UNCHANGED" @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }) $false
-                }
-
-                $chg = @($rows | Where-Object { $_.Action -in 'ADDED','CHANGED' }).Count
-                $unc = @($rows | Where-Object { $_.Action -eq 'UNCHANGED' }).Count
-                $lo  = @($rows | Where-Object { $_.Action -eq 'LIVE-ONLY' }).Count
-                Write-Host ""
-                Write-Host "Summary: $chg to add/change, $unc unchanged, $lo live-only (untouched)."
-
-      - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
-        parameters:
-          jobName: prodfix_approval
-          timeoutInMinutes: 10
-          approvers: |
-            ${{ variables.devopsApprovers }},
-            ${{ variables.qeApprovers }}
-      - job: prodfix_deploy
-        displayName: "Post-Release Deploy to prodfix-01"
-        dependsOn: prodfix_approval
-        condition: succeeded('prodfix_approval')
-        pool: { name: $(poolName), demands: azureps }
-        timeoutInMinutes: 190
-        steps:
-          - ${{ if eq(parameters.deployCode, true) }}:
-            - task: PowerShell@2
-              displayName: Normalize version metadata
-              inputs:
-                targetType: 'inline'
-                script: |
-                  $versionParts = '${{ parameters.artifactName }}' -split '\-b'
-                  # strip any non-numeric suffix (e.g. a pasted .zip extension) from the build id
-                  $buildId = ($versionParts[-1] -replace '[^0-9]', '')
-                  if (-not $buildId) { Write-Host "##vso[task.logissue type=error]Could not parse build id from artifact name '${{ parameters.artifactName }}' - expected format <name>-b<buildId>"; exit 1 }
-                  Write-Host "Code Version: $($versionParts[0])"
-                  Write-Host "Pipeline BuildId: $buildId"
-                  Write-Host "##vso[task.setvariable variable=pipelineBuildId]$buildId"
-                failOnStderr: true
-                pwsh: true
-                runScriptInSeparateScope: true
-            - task: DownloadPipelineArtifact@2
-              inputs:
-                buildType: 'specific'
-                project: '$(buildPipelineProject)'
-                definition: '$(buildPipelineDefinition)'
-                buildVersionToDownload: 'specific'
-                pipelineId: '$(pipelineBuildId)'
-                artifactName: '$(artifactName)'
-                itemPattern: '**'
-                targetPath: '$(downloadedArtifacts)/prodfix-01'
-          - pwsh: |
-              Write-Host "Artifact download complete for prodfix-01 (deployment steps are commented out)"
-            displayName: "Confirm artifact download"
-          # - task: PowerShell@2
-          #   name: buildAppSettings
-          #   displayName: Build App Settings
-          #   condition: eq(${{ parameters.deployAppSettings }}, true)
-          #   inputs:
-          #     targetType: 'inline'
-          #     script: |
-          #       New-Item -Path '$(appSettingsFile)' -Value '' -Type File -Force
-          #       & "$(Build.SourcesDirectory)/scripts/build-app-settings.ps1" -EnvName 'prodfix-01' -OutputPath '$(appSettingsFile)'
-          #     failOnStderr: true
-          #     showWarnings: true
-          #     pwsh: true
-          # NOTE: serviceConnection below is already a compile-time literal -
-          #       do NOT change it back to '$(deployServiceConnection)', a runtime
-          #       macro cannot be resolved or authorized by Azure DevOps.
-          # - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
-          #   parameters:
-          #     appSettingsPath: '$(appSettingsFile)'
-          #     appName: '$(functionAppName)'
-          #     package: '$(downloadedArtifacts)/prodfix-01/**/*${{ parameters.artifactName }}*.zip'
-          #     serviceConnection: RxI-PRODFIX-05
-          #     healthcheckEnabled: false
-          #     functionAppDeployEnabled: ${{ parameters.deployCode }}
-          #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
-################################################ END PRODFIX DEPLOYMENT STAGES ################################################
 
 
 ```
 {% endraw %}
+
+# RxInventory.PurchaseOrderManagement — Function App CD Pipeline
+
+This document explains what `reference-functionapp-cd.yaml` does, how it's structured, and how to run it. It reflects the current state of the pipeline after the recent restructuring (approval gates, app-settings diffing, environment renames, and service connection consolidation).
+
+## What this pipeline does, at a glance
+
+On every run, it:
+
+1. Downloads a specific build artifact by build ID (parsed from the Artifact Name you provide).
+2. For each non-prod environment, generates the *new* app settings, compares them against what's *currently live*, and prints a readable diff.
+3. Gates each deployment behind a manual approval that **auto-rejects after 2 minutes** if nobody responds.
+4. Deploys to non-prod environments in parallel.
+5. Once at least one non-prod environment (or a Break-Glass override) succeeds, opens a QE approval gate — itself gated on a successful prod app-settings diff.
+6. On QE approval, deploys to Prod, then to a post-prod `prodfix-01` environment.
+
+## Environments
+
+| Env id | Function App | Subscription |
+|---|---|---|
+| `dev` | `rxr-rxi-dev-01-cus-fa-purchaseordermanagement` | `RxI-NProd-05` |
+| `e2e-01` | `rxr-rxi-e2e-01-cus-fa-purchaseordermanagement` | `RxI-NProd-05` |
+| `e2e-02` | `rxr-rxi-e2e-02-cus-fa-purchaseordermanagement` | `RxI-NProd-05` |
+| `perf-01` | `rxr-rxi-perf-01-cus-fa-purchaseordermanagement` | `RxI-NProd-05` |
+| `prodfix-01` (non-prod validation pass) | `rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement` | `RxI-NProd-05` |
+| **Prod** | `rxr-rxi-prod-cus-fa-purchaseordermanagement` | `Rxi-prod05-static-ui-RxR-SCM` |
+| **prodfix-01** (post-prod hotfix pass) | `rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement` | `RxI-PRODFIX-05` |
+
+All five non-prod environments share **one** subscription (`RxI-NProd-05`) — there's no per-environment subscription branching anymore. `prodfix-01` appears twice by design: once as an early non-prod validation pass, and again after Prod as a genuine post-prod hotfix stage with its own approval and its own (separate) service connection.
+
+## Pipeline stages, in order
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  dev · e2e-01 · e2e-02 · perf-01 · prodfix-01  (parallel)    │
+│  each: Prepare & Diff → Approve (2 min) → Deploy              │
+└─────────────────────────────────────────────────────────────┘
+                    │ (at least one must succeed)
+                    ▼
+         Break-Glass Approval  (parallel escape hatch)
+                    │
+                    ▼
+     QE Review & Approval for Prod
+     (requires the prod diff to succeed AND
+      a non-prod env / Break-Glass to succeed)
+                    │
+                    ▼
+              Deploy to Prod
+     Prepare & Diff prod → Approve → Deploy
+                    │
+                    ▼
+           Deploy to prodfix-01
+     Prepare & Diff prodfix-01 → Approve → Deploy
+```
+
+### Non-prod environments
+
+Each of `dev`, `e2e-01`, `e2e-02`, `perf-01`, `prodfix-01` runs independently and in parallel (no dependency between them). Within each:
+
+1. **Prepare & Diff** — downloads the artifact, captures the *live* app settings from the running function app, generates the *new* app settings from the repo's build script, and prints a diff.
+2. **Approve deploy after diff review** — a manual approval gate. **Times out and auto-rejects after 2 minutes** if not actioned. Review the diff in the "Prepare & Diff" job log before approving.
+3. **Deploy** — pushes code and/or app settings, depending on the run's `Deploy Code` / `Deploy App Settings` inputs.
+
+### Break-Glass Approval
+
+Runs in parallel with everything else. If approved, it satisfies the QE stage's entry condition on its own — a way to reach Prod without any non-prod environment having succeeded, for genuine emergencies. It has no functional effect other than being a recorded approval.
+
+### QE Review & Approval for Prod
+
+This stage only starts once **both**:
+- the Prod app-settings diff has succeeded, **and**
+- at least one non-prod environment (or Break-Glass) has succeeded.
+
+It shows you the Prod diff and asks for approval before Prod deployment proceeds.
+
+### Deploy to Prod
+
+Runs its own **Prepare & Diff prod** step (build + capture + diff) immediately before the prod approval gate, so the diff you see is fresh at the point of approval — not the one shown earlier in QE. Approve, then it deploys.
+
+### Deploy to prodfix-01 (post-prod)
+
+Runs only after Prod succeeds. Same pattern: **Prepare & Diff prodfix-01** → approve → deploy. Uses its own service connection (`RxI-PRODFIX-05`), separate from the earlier non-prod `prodfix-01` pass.
+
+## Understanding the app settings diff
+
+Every "Prepare & Diff" step prints a table like this:
+
+```
+================ CHANGED ================
+Setting                          ExistingValue          DesiredValue
+-------                          -------------          ------------
+MitigationFunctionStartDate      01/26/2023 00:00:00    2023-01-26T00:00:00Z
+
+================ ADDED ================
+Setting     ExistingValue     DesiredValue
+-------     -------------     ------------
+NewFlag                       true
+
+================ LIVE-ONLY ================
+Setting
+-------
+SomeManuallySetKey
+
+================ UNCHANGED ================
+Setting
+-------
+FUNCTIONS_WORKER_RUNTIME_VERSION
+```
+
+- **CHANGED** — exists in both places, value differs. This *will* be overwritten on deploy. Values are shown.
+- **ADDED** — new setting, doesn't exist live yet. This *will* be created. Values are shown.
+- **LIVE-ONLY** — exists live but isn't managed by this deploy. **The deploy merges, it does not delete** — these are left untouched. Values are not shown (they may be secrets).
+- **UNCHANGED** — exists in both places with the same value already. Nothing happens. Values are not shown.
+
+Date/time values that differ only in formatting (e.g. `01/26/2023 00:00:00` vs `2023-01-26T00:00:00Z`) are treated as the same value and classified UNCHANGED, not CHANGED — Azure normalizes the format on deploy regardless.
+
+## How to run it
+
+1. Open the pipeline in Azure DevOps and select **Run pipeline**.
+2. Fill in the three inputs:
+   - **Artifact Name** — the build artifact to deploy, in the form `<name>-b<buildId>` (e.g. `RxInventory.PurchaseOrderManagement-1.0.0-b2068817`). The pipeline parses the trailing number after `-b` as the source build ID to download from. **Do not include a file extension** (no `.zip`).
+   - **Deploy Code** — whether to deploy the function app code package.
+   - **Deploy App Settings** — whether to build, diff, and publish app settings.
+3. Run. Each non-prod environment starts immediately.
+4. **Watch for "Permission needed"** on any stage — the first time a service connection is used by this pipeline, Azure DevOps requires a one-time authorization. Click **Permit** when prompted, or pre-authorize under *Project Settings → Service connections → [connection] → Security* to skip this in future runs. The connections you may need to authorize: `RxI-NProd-05`, `Rxi-prod05-static-ui-RxR-SCM`, `RxI-PRODFIX-05`.
+5. For each environment, review the "Prepare & Diff" job log, then approve or reject within **2 minutes** — the gate does not wait indefinitely.
+6. Once a non-prod environment succeeds (or Break-Glass is approved), review and approve the QE gate, then the Prod gate, then the prodfix-01 gate.
+
+## Known open items
+
+- **Deployment steps for Prod and prodfix-01 (post-prod) are currently commented out** in the YAML — those stages will download artifacts and run their diffs, but the actual `az` deploy call is disabled pending sign-off. Nonprod environments deploy live today.
+- **`branchName` was removed** as a pipeline parameter — the artifact is always resolved by exact build ID, so a branch filter was unused and has been dropped from the UI.
+- The 2-minute approval timeout is set low for testing the auto-reject behavior. Before using this pipeline for real releases, increase `timeoutInMinutes` on the `ManualValidation@0` tasks to a realistic review window.
