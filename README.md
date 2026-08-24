@@ -224,8 +224,7 @@ stages:
       )
     isSkippable: false
     variables:
-      - name: prodFunctionAppName
-        value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
+      - template: /variables/deploy/prod.yml
       - name: prodAppSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/app-settings.json'
     jobs:
@@ -239,7 +238,7 @@ stages:
             parameters:
               envLabel: prod
               scriptEnvName: prod
-              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
+              azureSubscription: ${{ variables.deployServiceConnection }}
               functionAppNameVar: '$(prodFunctionAppName)'
               newSettingsFile: '$(prodAppSettingsFile)'
               liveSettingsFile: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/live-app-settings.json'
@@ -261,16 +260,9 @@ stages:
     dependsOn: QEFinalApproval
     condition: succeeded('QEFinalApproval')
     variables:
-      - name: deployServiceConnection
-        value: "Rxi-prod05-static-ui-RxR-SCM"
-      - name: functionAppName
-        value: "rxr-rxi-prod-cus-fa-purchaseordermanagement"
+      - template: /variables/deploy/prod.yml
       - name: appSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod/app-settings.json'
-      # separate, real (non-TODO) values used only by the Prepare & Diff job below,
-      # so the diff works even while functionAppName above is still a placeholder
-      - name: prodFunctionAppName
-        value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
       - name: prodAppSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/app-settings.json'
     jobs:
@@ -284,7 +276,7 @@ stages:
             parameters:
               envLabel: prod
               scriptEnvName: prod
-              azureSubscription: Rxi-prod05-static-ui-RxR-SCM
+              azureSubscription: ${{ variables.deployServiceConnection }}
               functionAppNameVar: '$(prodFunctionAppName)'
               newSettingsFile: '$(prodAppSettingsFile)'
               liveSettingsFile: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prod-deploy/live-app-settings.json'
@@ -348,14 +340,14 @@ stages:
           #     pwsh: true
           # NOTE: serviceConnection below is already a compile-time literal -
           #       do NOT change it back to '$(deployServiceConnection)', a runtime
-          #       macro cannot be resolved or authorized by Azure DevOps.
+          #       macro cannot be resolved or authorized by Azure DevOps. Use the
+          #       compile-time ${{ variables.deployServiceConnection }} reference below.
           # - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
           #   parameters:
           #     appSettingsPath: '$(appSettingsFile)'
           #     appName: '$(functionAppName)'
           #     package: '$(downloadedArtifacts)/prod/**/*${{ parameters.artifactName }}*.zip'
-          #     # TODO: replace with the real prod service connection name (literal, not a variable)
-          #     serviceConnection: Rxi-prod05-static-ui-RxR-SCM
+          #     serviceConnection: ${{ variables.deployServiceConnection }}
           #     healthcheckEnabled: false
           #     functionAppDeployEnabled: ${{ parameters.deployCode }}
           #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
@@ -366,10 +358,7 @@ stages:
     dependsOn: DeployToProd
     condition: succeeded('DeployToProd')
     variables:
-      - name: deployServiceConnection
-        value: RxI-PRODFIX-05
-      - name: functionAppName
-        value: rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement
+      - template: /variables/deploy/prodfix-01-postprod.yml
       - name: appSettingsFile
         value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/app-settings.json'
     jobs:
@@ -383,7 +372,7 @@ stages:
             parameters:
               envLabel: prodfix-01
               scriptEnvName: prodfix-01
-              azureSubscription: RxI-PRODFIX-05
+              azureSubscription: ${{ variables.deployServiceConnection }}
               functionAppNameVar: '$(functionAppName)'
               newSettingsFile: '$(appSettingsFile)'
               liveSettingsFile: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/prodfix-01/live-app-settings.json'
@@ -447,18 +436,89 @@ stages:
           #     pwsh: true
           # NOTE: serviceConnection below is already a compile-time literal -
           #       do NOT change it back to '$(deployServiceConnection)', a runtime
-          #       macro cannot be resolved or authorized by Azure DevOps.
+          #       macro cannot be resolved or authorized by Azure DevOps. Use the
+          #       compile-time ${{ variables.deployServiceConnection }} reference below.
           # - template: dotnet/functions/deploy/deploy-common-template.yml@pipelineTemplate
           #   parameters:
           #     appSettingsPath: '$(appSettingsFile)'
           #     appName: '$(functionAppName)'
           #     package: '$(downloadedArtifacts)/prodfix-01/**/*${{ parameters.artifactName }}*.zip'
-          #     serviceConnection: RxI-PRODFIX-05
+          #     serviceConnection: ${{ variables.deployServiceConnection }}
           #     healthcheckEnabled: false
           #     functionAppDeployEnabled: ${{ parameters.deployCode }}
           #     functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
 ################################################ END PRODFIX DEPLOYMENT STAGES ################################################
 
+
+```
+{% endraw %}
+
+{% raw %}
+```yaml
+variables:
+  - name: deployServiceConnection
+    value: RxI-NProd-05
+  - name: functionAppName
+    value: rxr-rxi-dev-01-cus-fa-purchaseordermanagement
+
+```
+{% endraw %}
+
+{% raw %}
+```yaml
+variables:
+  - name: deployServiceConnection
+    value: RxI-NProd-05
+  - name: functionAppName
+    value: rxr-rxi-e2e-01-cus-fa-purchaseordermanagement
+
+```
+{% endraw %}
+
+{% raw %}
+```yaml
+variables:
+  - name: deployServiceConnection
+    value: RxI-NProd-05
+  - name: functionAppName
+    value: rxr-rxi-e2e-02-cus-fa-purchaseordermanagement
+
+```
+{% endraw %}
+
+{% raw %}
+```yaml
+variables:
+  - name: deployServiceConnection
+    value: RxI-NProd-05
+  - name: functionAppName
+    value: rxr-rxi-perf-01-cus-fa-purchaseordermanagement
+
+```
+{% endraw %}
+
+{% raw %}
+```yaml
+variables:
+  - name: deployServiceConnection
+    value: RxI-NProd-05
+  - name: functionAppName
+    value: rxr-rxi-prodfix-01-cus-fa-purchaseordermanagement
+
+```
+{% endraw %}
+
+{% raw %}
+```yaml
+variables:
+  - name: deployServiceConnection
+    value: Rxi-prod05-static-ui-RxR-SCM
+  - name: functionAppName
+    value: rxr-rxi-prod-cus-fa-purchaseordermanagement
+  # separate name used only by the Prepare & Diff job, kept distinct from
+  # functionAppName above per earlier open item (naming mismatch, unresolved)
+  - name: prodFunctionAppName
+    value: rxr-rxi-prod-01-cus-fa-purchaseordermanagement
 
 ```
 {% endraw %}
@@ -629,4 +689,3 @@ steps:
 
 ```
 {% endraw %}
-
