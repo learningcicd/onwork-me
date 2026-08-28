@@ -143,6 +143,7 @@ stages:
                 artifactName: '${{ parameters.artifactName }}'
                 deployCode: ${{ parameters.deployCode }}
                 deployAppSettings: ${{ parameters.deployAppSettings }}
+                serviceConnection: ${{ variables.deployServiceConnection }}
 ################################################ END NONPROD DEPLOYMENTS ################################################
 
   - stage: BreakGlassApproval
@@ -264,6 +265,7 @@ stages:
               artifactName: '${{ parameters.artifactName }}'
               deployCode: ${{ parameters.deployCode }}
               deployAppSettings: ${{ parameters.deployAppSettings }}
+              serviceConnection: ${{ variables.deployServiceConnection }}
 ################################################ END PROD DEPLOYMENT STAGE ################################################
 ################################################ START PRODFIX DEPLOYMENT STAGES ################################################
   - stage: post_deploy_stage_prodfix_01
@@ -312,6 +314,7 @@ stages:
               artifactName: '${{ parameters.artifactName }}'
               deployCode: ${{ parameters.deployCode }}
               deployAppSettings: ${{ parameters.deployAppSettings }}
+              serviceConnection: ${{ variables.deployServiceConnection }}
 ################################################ END PRODFIX DEPLOYMENT STAGES ################################################
 
 ```
@@ -329,6 +332,9 @@ parameters:
     type: boolean
   - name: deployAppSettings
     type: boolean
+  - name: serviceConnection   # passed explicitly by the caller - do not rely on
+    type: string              # implicit ${{ variables.x }} inheritance across the
+                               # external (different-repo) deploy-common-template.yml
 
 steps:
   # download the build artifact (only needed when deploying code)
@@ -379,7 +385,7 @@ steps:
       appSettingsPath: '$(appSettingsFile)'
       appName: '$(functionAppName)'
       package: '$(downloadedArtifacts)/${{ parameters.envLabel }}/**/*${{ parameters.artifactName }}*.zip'
-      serviceConnection: ${{ variables.deployServiceConnection }}
+      serviceConnection: ${{ parameters.serviceConnection }}
       healthcheckEnabled: false
       functionAppDeployEnabled: ${{ parameters.deployCode }}
       functionAppSettingsPublishEnabled: ${{ parameters.deployAppSettings }}
