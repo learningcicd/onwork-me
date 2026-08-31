@@ -1,94 +1,149 @@
 {% raw %}
 ```yaml
 trigger: none
-#trigger daily cosmos report generation
-#trigger every Monday at italian time: 11:00
+#trigger PartitionKey and UniqueKey
+#trigger at italian times: 12:00 on first and sixteenth day of each month
 schedules:
-  - cron: "0 9 * * 1" #utc time
+  - cron: "0 10 1,16 * *"
     always: true
-    displayName: Daily cosmos report generation for PowerBI
+    displayName: PartitionKey and UniqueKey
     branches:
       include:
-      - master
+        - master
+
+parameters:
+  - name: publishReports
+    displayName: "Publish Report"
+    type: boolean
+    default: true
 
 pool:
   name: rxi-agent-pool
 
-parameters:
-
-  - name: containerFilter
-    displayName: "Container Filter (Glob pattern)"
-    type: string
-    default: '*'
-
-  - name: publishReports
-    displayName: "Publish Reports"
-    type: boolean
-    default: true
+resources:
+  repositories:
+    - repository: RepoWikiMonitoring
+      type: git
+      name: "RxR-Architecture/rxi-monitoring-wiki"
+      ref: refs/heads/master
 
 variables:
-- group: CIsharedvariables
-- name: account-name
-  value: "<NONPROD_COSMOS_ACCOUNT_NAME>"
-- name: resource-group
-  value: "<NONPROD_RESOURCE_GROUP>"
-- name: serviceConnectionNameCosmos
-  value: "<NONPROD_SERVICE_CONNECTION_COSMOS>"
-- name: subscriptionName
-  value: "<NONPROD_SUBSCRIPTION_NAME>"
-- name: StorageAccountName
-  value: 'rxrrxiprf01cusst'
-- name: ContainerName
-  value: 'rxi-monitoring-cosmos'
-- name: publishReports
-  value: ${{ parameters.publishReports }}
-- name: containerFilter
-  value: '${{ parameters.containerFilter }}'
-- name: reportsFolder
-  value: '$(System.DefaultWorkingDirectory)/monitoring/cosmos/generate-cosmos-reports/reports'
-- name: serviceConnectionNameStorage
-  value: "RxI-PERF-05-BLOB"
-- name: storageAccountResourceGroup
-  value: "rxr-rxi-perf-01-cus-rg"
+  - group: RxI-Monitoring-Naples
+  - group: CIsharedvariables
+  - name: envName
+    value: "nonprod"
+  - name: StorageAccountName
+    value: 'rxrrxiprf01cusst'
+  - name: serviceConnectionNameStorage
+    value: "RxI-PERF-05-BLOB"
+  - name: storageAccountResourceGroup
+    value: "rxr-rxi-perf-01-cus-rg"
+  - name: ContainerName
+    value: 'rxi-monitoring-reports'
 
 stages:
-
-- stage: Generate_Report
-  jobs:
-
-  - job: GenerateReport
-    timeoutInMinutes: 480
-    steps:
-    - checkout: self
-      fetchDepth: 0
-    - task: AzureCLI@2
-      displayName: 'Generate Reports'
-      inputs:
-        azureSubscription: '$(serviceConnectionNameCosmos)'
-        scriptType: 'pscore'
-        scriptLocation: 'scriptPath'
-        scriptPath: '$(System.DefaultWorkingDirectory)/monitoring/cosmos/generate-cosmos-reports/runner.ps1'
-        arguments: "-AccountName $(account-name) -ResourceGroup $(resource-group) -Subscription $(subscriptionName)
-        -TargetFolder '$(reportsFolder)' -ContainerFilter '$(containerFilter)'"
-
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish Artifact'
-      inputs:
-        PathtoPublish: '$(reportsFolder)'
-        ArtifactName: drop
-        publishLocation: 'Container'
-
-    - task: AzureCLI@2
-      displayName: 'Publish on Blob Storage'
-      condition: eq(variables.publishReports, 'true')
-      inputs:
-        azureSubscription: '$(serviceConnectionNameStorage)'
-        scriptType: 'pscore'
-        scriptLocation: 'scriptPath'
-        scriptPath: '$(System.DefaultWorkingDirectory)/monitoring/utils/publish-blobs.ps1'
-        arguments: "-AccountName $(StorageAccountName) -Container $(ContainerName)
-        -ResourceGroup '$(storageAccountResourceGroup)' -Source '$(reportsFolder)/*' -RelativeBasePath '$(reportsFolder)'
-        -Target ''"
+  - stage: StageMonitoringPartitionKeyandUniqueKey
+    displayName: "Monitoring PartitionKey and UniqueKey"
+    variables:
+      - name: repositoryMonitoringPath
+        value: "$(System.DefaultWorkingDirectory)/rxi-utils/cosmos"
+      - name: repositoryMonitoringUtilsPath
+        value: "$(System.DefaultWorkingDirectory)/rxi-utils/utils"
+      - name: reportsFolder
+        value: "$(System.DefaultWorkingDirectory)/cosmos/reports"
+      - name: wikiBuildFolder
+        value: "$(Build.SourcesDirectory)/cosmos/reports/wiki"
+      - name: wikiADOFolder
+        value: "$(System.DefaultWorkingDirectory)/rxi-monitoring-wiki/lower-env/CosmosDB"
+      - name: accountName
+        value: "<NONPROD_COSMOS_ACCOUNT_NAME>"
+      - name: resourceGroup
+        value: "<NONPROD_RESOURCE_GROUP>"
+      - name: subscriptionName
+        value: "rpu-nprod-rxrenewal-05"
+      - name: subscriptionId
+        value: "<NONPROD_SUBSCRIPTION_ID>"
+      - name: subscriptionCosmosId
+        value: "<NONPROD_SUBSCRIPTION_COSMOS_ID>"
+      - name: nameBlobReport
+        value: "cosmos/report-$(accountName)-key-partition-unique.csv"
+    jobs:
+      - job: RunningMonitoring
+        timeoutInMinutes: 480
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - checkout: RepoWikiMonitoring
+            clean: true
+            persistCredentials: true
+          - task: PowerShell@2
+            displayName: "Cleaning Artifacts Folder"
+            inputs:
+              targetType: 'inline'
+              script: |
+                $artifactFile = "${{ variables.reportsFolder }}"
+                if (Test-Path $artifactFile) { Remove-Item -Recurse -Force $artifactFile }
+          - task: AzureCLI@2
+            displayName: "Generate Reports"
+            inputs:
+              azureSubscription: "<NONPROD_SERVICE_CONNECTION>"
+              scriptType: "pscore"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                cd '${{ variables.repositoryMonitoringPath }}'
+                $username = "$(bamboocheckoutuser)"
+                $passwordConfluence = ConvertTo-SecureString "$(bamboocheckoutpass)" -AsPlainText -Force
+                $credentialConfluence = new-object -typename System.Management.Automation.PSCredential -argumentlist $username, $passwordConfluence
+                $password = ConvertTo-SecureString "$(principalKEY)" -AsPlainText -Force
+                $Credential = New-Object System.Management.Automation.PsCredential("$(principalID)", $password)
+                $tenantId="$(tenantId)"
+                Connect-AzAccount -ServicePrincipal -TenantId $tenantId -Credential $Credential -SubscriptionId ${{ variables.subscriptionName }}
+                $Params = @{
+                    "RunnedBy"                = "$(Build.QueuedBy)"
+                    "NamePipeline"            = "$(Build.DefinitionName)"
+                    "IdPipeline"              = "$(Build.BuildId)"
+                    "envName"                 = "${{ variables.envName }}"
+                    "accountName"             = "${{ variables.accountName }}"
+                    "resourceGroup"           = "${{ variables.resourceGroup }}"
+                    "subscriptionName"        = "${{ variables.subscriptionName }}"
+                    "subscriptionCosmosId"    = "${{ variables.subscriptionCosmosId }}"
+                    "subscriptionId"          = "${{ variables.subscriptionCosmosId }}"
+                    "TargetFolder"            = "${{ variables.reportsFolder }}"
+                    "publishReports"          = "${{ parameters.publishReports }}"
+                    "ConfluenceSpace"         = "RXRSCPLTF"
+                    "ParentPageId"            = "183607497"
+                    "Credential"              = $credentialConfluence
+                }
+                & "./key-partition-unique.ps1" @Params
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish Artifact"
+            inputs:
+              PathtoPublish: "$(reportsFolder)"
+              ArtifactName: drop
+              publishLocation: "Container"
+          - task: AzureCLI@2
+            displayName: 'Publish on Blob Storage'
+            condition: eq(${{ parameters['publishReports'] }}, True)
+            inputs:
+              azureSubscription: '$(serviceConnectionNameStorage)'
+              scriptType: 'pscore'
+              scriptLocation: 'scriptPath'
+              scriptPath: '${{ variables.repositoryMonitoringUtilsPath }}/publish-blobs.ps1'
+              arguments: "-AccountName $(StorageAccountName) -Container $(ContainerName) -ResourceGroup '$(storageAccountResourceGroup)' -Source '$(reportsFolder)/$(nameBlobReport)' -RelativeBasePath '$(reportsFolder)' -Target ''"
+          - bash: |
+              cd ${{ variables.wikiADOFolder }}
+              git config --global user.name "AzureDevOpsUser"
+              git config --global user.email azureDevOpsUser@walgreens.com
+              git switch master
+              git pull origin master --rebase
+              mv "${{ variables.wikiBuildFolder }}"/*.MD "${{ variables.wikiADOFolder }}"
+              git add --all
+              git commit -m "Update ADO"
+              git push origin master
+            displayName: "Update Wiki ADO"
+            condition: eq(${{ parameters['publishReports'] }}, True)
+            retryCountOnTaskFailure: 3
+            continueOnError: true
 
 ```
 {% endraw %}
