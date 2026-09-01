@@ -73,6 +73,8 @@ stages:
         - name: appSettingsFile
           value: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/app-settings.json'
       jobs:
+        # ---- Prep job: download artifact, capture live settings, build new, diff (table) ----
+        # runs immediately - no approval needed to prepare & show the diff
         - job: prepJob
           displayName: Prepare & Diff ${{ env }}
           pool: { name: $(poolName), demands: azureps }
@@ -111,14 +113,20 @@ stages:
                 liveSettingsFile: '$(Build.SourcesDirectory)/temp/$(Build.BuildId)/${{ env }}/live-app-settings.json'
                 artifactName: '${{ parameters.artifactName }}'
                 deployAppSettings: ${{ parameters.deployAppSettings }}
---
+
+        # ---- Single approval gate: review the diff above, then approve to deploy ----
         - job: diffApprovalJob
           dependsOn: prepJob
           displayName: Approve deploy after diff review (${{ env }})
           pool: server   # agentless - required for ManualValidation
           timeoutInMinutes: 1440   # 1 day - raised so this doesn't silently cap the
+                                   # gate now that the task-level timeout is unset.
+                                   # Chosen value, not drawn from helm (helm doesn't
+                                   # use this inline-task pattern for its per-env gate).
           steps:
             - task: ManualValidation@0
+              # MATCHED to helm reference: helm leaves this env-level gate's
+              # timeout unset (uses the shared template's/task's own default).
               # Previous testing value commented out below rather than applied.
               # timeoutInMinutes: 2   # gate auto-rejects after 2 minutes
               inputs:
@@ -127,6 +135,7 @@ stages:
                 instructions: "Artifact: ${{ parameters.artifactName }} | Env: ${{ env }}. Review the app settings diff in the 'Prepare & Diff' job log, then approve to deploy."
                 onTimeout: 'reject'
 
+        # ---- Deploy job: runs only after the diff has been approved ----
         - job: deployJob
           dependsOn: diffApprovalJob
           condition: succeeded('diffApprovalJob')
@@ -300,7 +309,7 @@ stages:
       - template: jobs/job-manual-approval.yml@rxiPipelineTemplate
         parameters:
           jobName: prodfix_approval
-          timeoutInMinutes: 1440 
+          timeoutInMinutes: 1440 # 1 day - matches helm reference (post_deploy_stage prodfix_approval)
           approvers: |
             ${{ variables.devopsApprovers }},
             ${{ variables.qeApprovers }}
