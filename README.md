@@ -1,12 +1,12 @@
 {% raw %}
 ```yaml
 trigger: none
-#trigger Monitoring RU
-#trigger montly on Monday at italian time: 3:00.
+#trigger Physical Partition Over Size
+#trigger at italian times: 5:00 on every Monday
 schedules:
-  - cron: "0 1 * * 1"
+  - cron: "0 3 * * 1"
     always: true
-    displayName: Monitoring RU
+    displayName: Physical Partition Over Size
     branches:
       include:
         - master
@@ -22,7 +22,8 @@ parameters:
     default: true
 
 pool:
-  name: "<NONPROD_AGENT_POOL_NAME>"          # e.g. rxi-be17-agent-pool-nprod
+  #name: rxi-be17-agent-pool-prod
+  name: "rxi-be17-agent-pool"
 
 resources:
   repositories:
@@ -36,16 +37,20 @@ variables:
   - group: CIsharedvariables
   - name: envName
     value: "nonprod"
+  - name: sizeGB
+    value: "40"
   - name: StorageAccountName
     value: 'rxrrxiprf01cusst'
   - name: serviceConnectionNameStorage
     value: "RxI-PERF-05-BLOB"
+  - name: storageAccountResourceGroup
+    value: "rxr-rxi-perf-01-cus-rg"
   - name: ContainerName
-    value: 'rxi-monitoring-reports'
+    value : 'rxi-monitoring-reports'
 
 stages:
   - stage: StageMonitoringPhysicalPartitionOverSize
-    displayName: "Monitoring RU"
+    displayName: "Monitoring Physical Partition Over Size"
     variables:
       - name: repositoryMonitoringPath
         value: "$(System.DefaultWorkingDirectory)/rxi-utils/cosmos"
@@ -58,19 +63,17 @@ stages:
       - name: wikiADOFolder
         value: "$(System.DefaultWorkingDirectory)/rxi-monitoring-wiki/lower-env/CosmosDB"
       - name: accountName
-        value: "<NONPROD_COSMOS_ACCOUNT_NAME>"          # e.g. rxr-rxi-perf-cus-cosmos-01
-      - name: resourceGroup
-        value: "<NONPROD_RESOURCE_GROUP_NAME>"          # e.g. rxr-rxi-perf-cus-rg
-      - name: subscriptionName
-        value: "<NONPROD_SUBSCRIPTION_NAME>"            # e.g. rpu-nprod-rxrenewal-01
-      - name: subscriptionId
-        value: "<NONPROD_SUBSCRIPTION_ID>"
-      - name: subscriptionCosmosId
-        value: "<NONPROD_SUBSCRIPTION_COSMOS_ID>"
+        value: "rxi-perf-nprod-cus"
       - name: nameBlobReport
-        value: "report-$(accountName)-RU.csv"
-      - name: FullBlobReport
-        value: "cosmos/$(nameBlobReport)"
+        value: "cosmos/report-$(accountName)-Partition-Over-($(sizeGB))GB.csv"
+      - name: resourceGroup
+        value: "rxr-rxi-perf-01-cus-rg"
+      - name: subscriptionName
+        value: "rpu-nprod-rxrenewal-05"
+      - name: subscriptionId
+        value: "117cc72c-bb3d-4b86-beba-be946bf2f5d8"
+      - name: subscriptionCosmosId
+        value: "d6e2435c-9500-4114-8724-fb0cad5d50b7"
     jobs:
       - job: RunningMonitoring
         timeoutInMinutes: 480
@@ -80,6 +83,7 @@ stages:
           - checkout: RepoWikiMonitoring
             clean: true
             persistCredentials: true
+            fetchDepth: 0
           - task: PowerShell@2
             displayName: "Cleaning Artifacts Folder"
             inputs:
@@ -88,29 +92,20 @@ stages:
                 $artifactFile = "${{ variables.reportsFolder }}"
                 if (Test-Path $artifactFile) { Remove-Item -Recurse -Force $artifactFile }
           - task: AzureCLI@2
-            displayName: 'Download From Blob Storage'
-            condition: eq(${{ parameters['publishReports'] }}, True)
-            continueOnError: true
-            inputs:
-              azureSubscription: '$(serviceConnectionNameStorage)'
-              scriptType: 'pscore'
-              scriptLocation: 'scriptPath'
-              scriptPath: '${{ variables.repositoryMonitoringUtilsPath }}/download-blobs.ps1'
-              arguments: "-AccountName $(StorageAccountName) -Container $(ContainerName) -ResourceGroup '$(storageAccountResourceGroup)'
-              -BlobName '$(FullBlobReport)'
-              -DestinationPath '$(repositoryMonitoringPath)'"
-          - task: AzureCLI@2
             displayName: "Generate Reports"
             inputs:
-              azureSubscription: "<NONPROD_SERVICE_CONNECTION_NAME>"          # e.g. RxI-E2E-Leap-05
+              azureSubscription: "RxI-NProd-05"
               scriptType: "pscore"
               scriptLocation: "inlineScript"
               inlineScript: |
                 cd '${{ variables.repositoryMonitoringPath }}'
+                $username = "$(bamboocheckoutuser)"
+                $passwordConfluence = ConvertTo-SecureString "$(bamboocheckoutpass)" -AsPlainText -Force
+                $credentialConfluence = new-object -typename System.Management.Automation.PSCredential -argumentlist $username, $passwordConfluence
                 $password = ConvertTo-SecureString "$(principalKEY)" -AsPlainText -Force
                 $SecretCodeFuncMailSenderEncoded = ConvertTo-SecureString "$(SecretCodeFuncMailSender)" -AsPlainText -Force
-                $Credential = New-Object System.Management.Automation.PsCredential("$(principalID)", $password)
-                $tenantId = "$(tenantId)"
+                $Credential = New-Object System.Management.Automation.PsCredential("$(principalID)",$password)
+                $tenantId="$(tenantId)"
                 Connect-AzAccount -ServicePrincipal -TenantId $tenantId -Credential $Credential -SubscriptionId ${{ variables.subscriptionName }}
                 $Params = @{
                     "RunnedBy"                 = "$(Build.QueuedBy)"
@@ -122,14 +117,19 @@ stages:
                     "subscriptionName"          = "${{ variables.subscriptionName }}"
                     "subscriptionCosmosId"      = "${{ variables.subscriptionCosmosId }}"
                     "subscriptionId"            = "${{ variables.subscriptionId }}"
+                    "Size"                      = "${{ variables.sizeGB }}"
+                    "SeverityLevel"             = "2"
                     "TargetFolder"              = "${{ variables.reportsFolder }}"
                     "publishReports"            = "${{ parameters.publishReports }}"
                     "isSendMail"                = "${{ parameters.isSendMail }}"
                     "SecretCodeFuncMailSender"  = $SecretCodeFuncMailSenderEncoded
                     "ToMail"                    = "DEFAULT"
                     "CcMail"                    = "DEFAULT"
+                    "ConfluenceSpace"           = "~fzivient"
+                    "ParentPageId"              = "238467051"
+                    "Credential"                = $credentialConfluence
                 }
-                & "./monitor-ru.ps1" @Params
+                & "./physical-partition-over-size.ps1" @Params
           - task: PublishBuildArtifacts@1
             displayName: "Publish Artifact"
             inputs:
@@ -144,13 +144,13 @@ stages:
               scriptType: 'pscore'
               scriptLocation: 'scriptPath'
               scriptPath: '${{ variables.repositoryMonitoringUtilsPath }}/publish-blobs.ps1'
-              arguments: "-AccountName $(StorageAccountName) -Container $(ContainerName) -ResourceGroup '$(storageAccountResourceGroup)' -Source '$(reportsFolder)/$(FullBlobReport)' -RelativeBasePath '$(reportsFolder)' -Target ''"
+              arguments: "-AccountName $(StorageAccountName) -Container $(ContainerName) -ResourceGroup '$(storageAccountResourceGroup)' -Source '$(reportsFolder)/$(nameBlobReport)' -RelativeBasePath '$(reportsFolder)' -Target ''"
           - bash: |
               cd ${{ variables.wikiADOFolder }}
               git config --global user.name "AzureDevOpsUser"
               git config --global user.email azureDevOpsUser@walgreens.com
-              git fetch origin master
-              git checkout -B master origin/master
+              git switch master
+              git pull origin master --rebase
               mv "${{ variables.wikiBuildFolder }}"/*.MD "${{ variables.wikiADOFolder }}"
               git add --all
               git commit -m "Update ADO"
