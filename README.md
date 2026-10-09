@@ -62,7 +62,8 @@ function Get-AdoAll([string]$Url) {
   $all
 }
 
-function New-Set { [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
+# Leading comma: stops PowerShell from unrolling the empty set into $null on return
+function New-Set { , [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
 function Join-Set($s) { if ($s -and $s.Count) { ($s | Sort-Object) -join '; ' } else { '' } }
 
 # --- Resolve projects ---
