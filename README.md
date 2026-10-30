@@ -4,5 +4,441 @@
 ```
 {% endraw %}
 
+```bash
+<#
+.SYNOPSIS
+  Lists every pipeline in one or more Azure DevOps projects and the agent pool(s) each uses,
+  and saves the result as an Excel workbook.
 
+.DESCRIPTION
+  Workbook sheets:
+    Pipelines     - one row per pipeline definition (all folders, including never-run/disabled ones)
+    Pool Summary  - one row per pool: how many pipelines use it, and which
+
+  Pipelines columns:
+    Project, Type, Pipeline, Folder
+    LatestRunPools  - pools used by the most recent run (what the pipeline uses today)
+    LatestRun       - that run's number/name
+    LatestRunDate   - when that run's last job finished (local time, yyyy-MM-dd HH:mm).
+                      If the run is older than the pool job history, it comes from the
+                      definition's latest build / last release instead, and LatestRunPools
+                      shows '(not in pool job history)'. '(no runs kept)' = no run within retention.
+    LatestRunBy     - who started that run (for CI/schedule runs: the person the run was queued for)
+    LatestRunReason - why it ran: manual, individualCI, batchedCI, schedule, pullRequest, ...
+    NodeWarnings    - only with -NodeWarnings: number of Node.js-related warnings in the latest run
+                      (0 = checked, none found; blank = not checked: no run, or older than -Since)
+    NodeWarningTasks- the tasks behind those warnings, e.g. AzureCLI@2 (Node 10)
+    PoolsUsed       - every pool any run used in the job-history window, most recent first
+    PoolLastUsed    - same pools with the date each was last used
+    ConfiguredPools - pools set on the definition (classic build phases, classic release stages)
+    DefaultPool     - YAML only: the default queue on the pipeline settings (the YAML 'pool:' overrides it)
+    Source          - YAML only: repo and YAML file path
+
+  Excel output uses the ImportExcel module if installed, otherwise Excel itself (must be installed).
+  If neither is available it falls back to a .csv with the same columns.
+
+.EXAMPLE
+  .\pipelines-pool-map.ps1 -Project "RxI-Integration"
+  .\pipelines-pool-map.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
+  .\pipelines-pool-map.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
+  .\pipelines-pool-map.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
+#>
+param(
+  [Parameter(Mandatory)][string[]]$Project,
+  [string]$Org = 'Rx-Renewal',
+  [int]$JobHistory = 5000,
+  [string]$OutFile,
+  [switch]$NodeWarnings,     # also check each latest run for Node.js warnings
+  [string]$Since = ''        # with -NodeWarnings: only check runs on/after this date, e.g. 2026-07-01
+)
+$ErrorActionPreference = 'Stop'
+if (-not $OutFile) {
+  $tag = if ($Project.Count -eq 1) { $Project[0] -replace '[^\w-]', '_' } else { "$($Project.Count)-projects" }
+  $OutFile = ".\pipeline-pools-$tag.xlsx"
+}
+
+# Azure DevOps token from the az login session (no PAT needed)
+$token = az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv
+if (-not $token) { throw "No token. Run 'az login' first." }
+$H    = @{ Authorization = "Bearer $token" }
+$base = "https://dev.azure.com/$Org"
+$vsrm = "https://vsrm.dev.azure.com/$Org"
+
+function Get-AdoAll([string]$Url) {
+  $all = [System.Collections.Generic.List[object]]::new()
+  $ct  = $null
+  do {
+    $u = if ($ct) { "$Url&continuationToken=$([uri]::EscapeDataString($ct))" } else { $Url }
+    $resp = Invoke-RestMethod -Uri $u -Headers $H -ResponseHeadersVariable rh
+    if ($resp.value) { $all.AddRange([object[]]$resp.value) }
+    $k  = $rh.Keys | Where-Object { $_ -ieq 'x-ms-continuationtoken' } | Select-Object -First 1
+    $ct = if ($k) { @($rh[$k])[0] } else { $null }
+  } while ($ct)
+  $all
+}
+
+# Leading comma: stops PowerShell from unrolling the empty set into $null on return
+function New-Set { , [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
+function Join-Set($s) { if ($s -and $s.Count) { ($s | Sort-Object) -join '; ' } else { '' } }
+
+# Observed-pool helpers: most recently used pool first
+function Format-Used($h) {
+  if (-not $h -or $h.Count -eq 0) { return '' }
+  ($h.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object Key) -join '; '
+}
+function Format-UsedDates($h) {
+  if (-not $h -or $h.Count -eq 0) { return '' }
+  ($h.GetEnumerator() | Sort-Object Value -Descending |
+    ForEach-Object { "$($_.Key): $($_.Value.ToString('yyyy-MM-dd'))" }) -join '; '
+}
+# Turn Node warning messages into a short list like "AzureCLI@2 (Node 10)"
+function Get-NodeSummary($msgs) {
+  $items = foreach ($m in @($msgs)) {
+    $m = [string]$m
+    if ($m -match "Task '(?<t>[^']+)' version (?<v>[\d.]+).*?Node(?: version)?\s*\(?(?<n>\d+)") {
+      "$($Matches.t)@$($Matches.v) (Node $($Matches.n))"
+    } elseif ($m -match 'Node(?:\.js)?\s*(?<n>\d+)') {
+      "Node $($Matches.n): " + $m.Substring(0, [Math]::Min(90, $m.Length))
+    } else {
+      $m.Substring(0, [Math]::Min(100, $m.Length))
+    }
+  }
+  @($items | Sort-Object -Unique) -join '; '
+}
+
+function Get-RunCols($key) {
+  $lr = $latest[$key]
+  [pscustomobject]@{
+    PoolsUsed      = Format-Used $observed[$key]
+    PoolLastUsed   = Format-UsedDates $observed[$key]
+    LatestRun      = if ($lr) { $lr.Name } else { '' }
+    LatestRunDate  = if ($lr -and $lr.Date) { $lr.Date.ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { '' }
+    LatestRunPools = if ($lr) { Join-Set $lr.Pools } else { '' }
+    LatestRunId    = if ($lr) { $lr.Id } else { $null }
+  }
+}
+
+# --- Resolve projects ---
+$projInfo = @{}   # projectId -> name
+foreach ($name in $Project) {
+  $pr = Invoke-RestMethod -Uri "$base/_apis/projects/$([uri]::EscapeDataString($name))?api-version=7.1" -Headers $H
+  $projInfo[$pr.id] = $pr.name
+}
+
+# --- Observed: which pools each pipeline's jobs ran on (read once for all projects) ---
+Write-Host "Reading job history from every pool in $Org (this can take a minute)..."
+$observed = @{}   # "projectId|planType|definitionId" -> @{ poolName = last used time }
+$latest   = @{}   # "projectId|planType|definitionId" -> @{ Id; Name; Pools } for the most recent run
+$oldest   = @{}   # projectId -> oldest finishTime seen
+$pools = (Invoke-RestMethod -Uri "$base/_apis/distributedtask/pools?api-version=7.1" -Headers $H).value
+foreach ($pool in $pools) {
+  try {
+    $jobs = (Invoke-RestMethod -Uri "$base/_apis/distributedtask/pools/$($pool.id)/jobrequests?completedRequestCount=$JobHistory&api-version=7.1-preview.1" -Headers $H).value
+  } catch {
+    Write-Warning "Skipped pool '$($pool.name)': $($_.Exception.Message)"
+    continue
+  }
+  foreach ($j in $jobs) {
+    if (-not $projInfo.ContainsKey([string]$j.scopeId) -or -not $j.definition) { continue }
+    $key = "$($j.scopeId)|$($j.planType)|$($j.definition.id)"
+    $t = if ($j.finishTime) { [datetime]$j.finishTime } elseif ($j.assignTime) { [datetime]$j.assignTime } else { [datetime]$j.queueTime }
+
+    # pool -> most recent time a job of this pipeline ran on it
+    if (-not $observed.ContainsKey($key)) { $observed[$key] = @{} }
+    if (-not $observed[$key].ContainsKey($pool.name) -or $t -gt $observed[$key][$pool.name]) { $observed[$key][$pool.name] = $t }
+
+    # latest run (highest run id) and the pools its jobs used
+    $runId = [long]$j.owner.id
+    if (-not $latest.ContainsKey($key) -or $runId -gt $latest[$key].Id) {
+      $latest[$key] = @{ Id = $runId; Name = [string]$j.owner.name; Pools = (New-Set); Date = $t }
+    }
+    if ($runId -eq $latest[$key].Id) {
+      [void]$latest[$key].Pools.Add($pool.name)
+      if ($t -gt $latest[$key].Date) { $latest[$key].Date = $t }   # last job of that run
+    }
+
+    if ($j.finishTime) {
+      $ft = [datetime]$j.finishTime
+      if (-not $oldest[[string]$j.scopeId] -or $ft -lt $oldest[[string]$j.scopeId]) { $oldest[[string]$j.scopeId] = $ft }
+    }
+  }
+}
+
+$rows = [System.Collections.Generic.List[object]]::new()
+
+foreach ($projId in $projInfo.Keys) {
+  $projName = $projInfo[$projId]
+  $p = [uri]::EscapeDataString($projName)
+  Write-Host "Project $projName ..."
+  $buildFill   = [System.Collections.Generic.List[object]]::new()
+  $releaseFill = [System.Collections.Generic.List[object]]::new()
+
+  # queue id -> pool name (queues are per project)
+  $queues = @{}
+  (Invoke-RestMethod -Uri "$base/$($p)/_apis/distributedtask/queues?api-version=7.1-preview.1" -Headers $H).value |
+    ForEach-Object { $queues[[string]$_.id] = $_.pool.name }
+  $poolName = {
+    param($queueId)
+    if (-not $queueId) { return $null }
+    $n = $queues[[string]$queueId]
+    if ($n) { $n } else { "queue#$queueId" }
+  }
+
+  # Build pipelines (YAML + classic), all folders
+  $defs = Get-AdoAll "$base/$($p)/_apis/build/definitions?includeAllProperties=true&includeLatestBuilds=true&queryOrder=definitionNameAscending&api-version=7.1"
+  foreach ($d in $defs) {
+    $isYaml = $d.process.type -eq 2
+    $cfg = New-Set
+    $defaultPool = & $poolName $d.queue.id
+    if (-not $isYaml) {
+      if ($defaultPool) { [void]$cfg.Add($defaultPool) }
+      foreach ($ph in @($d.process.phases)) {
+        $n = & $poolName $ph.target.queue.id
+        if ($n) { [void]$cfg.Add($n) }
+      }
+    }
+    $rc = Get-RunCols "$projId|Build|$($d.id)"
+    if (-not $rc.LatestRunDate) {
+      # Not in pool job history: fall back to the definition's latest build (goes back to build retention)
+      $lb = if ($d.latestBuild) { $d.latestBuild } else { $d.latestCompletedBuild }
+      if ($lb) {
+        $dt = if ($lb.finishTime) { $lb.finishTime } elseif ($lb.startTime) { $lb.startTime } else { $lb.queueTime }
+        $rc.LatestRunId    = $lb.id
+        $rc.LatestRun      = [string]$lb.buildNumber
+        $rc.LatestRunDate  = if ($dt) { ([datetime]$dt).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { '' }
+        $rc.LatestRunPools = '(not in pool job history)'
+      } else {
+        $rc.LatestRun = '(no runs kept)'
+      }
+    }
+    $row = [pscustomobject]@{
+      Project         = $projName
+      Type            = if ($isYaml) { 'YAML' } else { 'Classic build' }
+      Pipeline        = $d.name
+      Folder          = $d.path
+      LatestRunPools  = $rc.LatestRunPools
+      LatestRun       = $rc.LatestRun
+      LatestRunDate   = $rc.LatestRunDate
+      LatestRunBy     = ''
+      LatestRunReason = ''
+      NodeWarnings    = ''
+      NodeWarningTasks = ''
+      PoolsUsed       = $rc.PoolsUsed
+      PoolLastUsed    = $rc.PoolLastUsed
+      ConfiguredPools = Join-Set $cfg
+      DefaultPool     = if ($isYaml) { $defaultPool } else { '' }
+      Source          = if ($isYaml) { "$($d.repository.name):$($d.process.yamlFilename)" } else { '' }
+    }
+    $rows.Add($row)
+    if ($rc.LatestRunId) { $buildFill.Add(@{ Row = $row; Id = $rc.LatestRunId }) }
+  }
+
+  # Classic release pipelines
+  try {
+    $rdefs = Get-AdoAll "$vsrm/$($p)/_apis/release/definitions?`$expand=lastRelease&api-version=7.1"
+  } catch {
+    Write-Warning "Release definitions not read for ${projName}: $($_.Exception.Message)"
+    $rdefs = @()
+  }
+  foreach ($rd in $rdefs) {
+    $full = Invoke-RestMethod -Uri "$vsrm/$($p)/_apis/release/definitions/$($rd.id)?api-version=7.1" -Headers $H
+    $cfg = New-Set
+    foreach ($envr in @($full.environments)) {
+      foreach ($ph in @($envr.deployPhases)) {
+        $qid = $ph.deploymentInput.queueId
+        if ($qid -gt 0) { [void]$cfg.Add((& $poolName $qid)) }
+        elseif ($ph.phaseType -eq 'machineGroupBasedDeployment') { [void]$cfg.Add('(deployment group)') }
+      }
+    }
+    $rc = Get-RunCols "$projId|Release|$($rd.id)"
+    if (-not $rc.LatestRunDate) {
+      # Not in pool job history: fall back to the definition's last release
+      if ($rd.lastRelease) {
+        $rc.LatestRunId    = $rd.lastRelease.id
+        $rc.LatestRun      = [string]$rd.lastRelease.name
+        $rc.LatestRunDate  = if ($rd.lastRelease.createdOn) { ([datetime]$rd.lastRelease.createdOn).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { '' }
+        $rc.LatestRunPools = '(not in pool job history)'
+      } else {
+        $rc.LatestRun = '(no runs kept)'
+      }
+    }
+    $row = [pscustomobject]@{
+      Project         = $projName
+      Type            = 'Classic release'
+      Pipeline        = $full.name
+      Folder          = $full.path
+      LatestRunPools  = $rc.LatestRunPools
+      LatestRun       = $rc.LatestRun
+      LatestRunDate   = $rc.LatestRunDate
+      LatestRunBy     = ''
+      LatestRunReason = ''
+      NodeWarnings    = ''
+      NodeWarningTasks = ''
+      PoolsUsed       = $rc.PoolsUsed
+      PoolLastUsed    = $rc.PoolLastUsed
+      ConfiguredPools = Join-Set $cfg
+      DefaultPool     = ''
+      Source          = ''
+    }
+    $rows.Add($row)
+    if ($rc.LatestRunId) { $releaseFill.Add(@{ Row = $row; Id = $rc.LatestRunId }) }
+  }
+
+  # --- Who started the latest run (looked up in batches of 50 runs) ---
+  Write-Host "  Looking up who ran the latest runs..."
+  $info = @{}
+  $ids = @($buildFill | ForEach-Object { [string]$_.Id } | Sort-Object -Unique)
+  for ($i = 0; $i -lt $ids.Count; $i += 50) {
+    $chunk = $ids[$i..([Math]::Min($i + 49, $ids.Count - 1))] -join ','
+    try {
+      (Invoke-RestMethod -Uri "$base/$($p)/_apis/build/builds?buildIds=$chunk&api-version=7.1" -Headers $H).value |
+        ForEach-Object { $info["b$($_.id)"] = @{ By = $_.requestedFor.displayName; Reason = [string]$_.reason } }
+    } catch { Write-Warning "Build run details not read: $($_.Exception.Message)" }
+  }
+  $ids = @($releaseFill | ForEach-Object { [string]$_.Id } | Sort-Object -Unique)
+  for ($i = 0; $i -lt $ids.Count; $i += 50) {
+    $chunk = $ids[$i..([Math]::Min($i + 49, $ids.Count - 1))] -join ','
+    try {
+      (Invoke-RestMethod -Uri "$vsrm/$($p)/_apis/release/releases?releaseIdFilter=$chunk&`$top=100&api-version=7.1" -Headers $H).value |
+        ForEach-Object { $info["r$($_.id)"] = @{ By = $_.createdBy.displayName; Reason = [string]$_.reason } }
+    } catch { Write-Warning "Release details not read: $($_.Exception.Message)" }
+  }
+  foreach ($f in $buildFill)   { $x = $info["b$($f.Id)"]; if ($x) { $f.Row.LatestRunBy = $x.By; $f.Row.LatestRunReason = $x.Reason } }
+  foreach ($f in $releaseFill) { $x = $info["r$($f.Id)"]; if ($x) { $f.Row.LatestRunBy = $x.By; $f.Row.LatestRunReason = $x.Reason } }
+
+  # --- Node.js warnings in the latest run (optional, -NodeWarnings) ---
+  if ($NodeWarnings) {
+    $sinceText = if ($Since) { ([datetime]$Since).ToString('yyyy-MM-dd') } else { '' }
+    $bT = @($buildFill   | Where-Object { -not $sinceText -or $_.Row.LatestRunDate -ge $sinceText })
+    $rT = @($releaseFill | Where-Object { -not $sinceText -or $_.Row.LatestRunDate -ge $sinceText })
+    Write-Host "  Checking $($bT.Count + $rT.Count) latest runs for Node.js warnings..."
+    $b = $base; $v = $vsrm; $hd = $H; $pp = $p
+
+    $res = @($bT | ForEach-Object -ThrottleLimit 8 -Parallel {
+      $f = $_
+      try {
+        $tl = Invoke-RestMethod -Uri "$($using:b)/$($using:pp)/_apis/build/builds/$($f.Id)/timeline?api-version=7.1" -Headers $using:hd
+        $msgs = @($tl.records | ForEach-Object { $_.issues } |
+          Where-Object { $_ -and $_.type -eq 'warning' -and $_.message -match 'node' } | ForEach-Object { $_.message })
+        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Err = $null }
+      } catch { [pscustomobject]@{ Row = $f.Row; Msgs = @(); Err = $_.Exception.Message } }
+    })
+
+    $res += @($rT | ForEach-Object -ThrottleLimit 8 -Parallel {
+      $f = $_
+      try {
+        $rel = Invoke-RestMethod -Uri "$($using:v)/$($using:pp)/_apis/release/releases/$($f.Id)?api-version=7.1" -Headers $using:hd
+        $msgs = @(foreach ($e in @($rel.environments)) { foreach ($ds in @($e.deploySteps)) { foreach ($ph in @($ds.releaseDeployPhases)) {
+          foreach ($dj in @($ph.deploymentJobs)) {
+            foreach ($i in (@($dj.job.issues) + @($dj.tasks | ForEach-Object { $_.issues }))) {
+              if ($i -and "$($i.issueType)$($i.type)" -match 'warning' -and $i.message -match 'node') { $i.message }
+            } } } } })
+        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Err = $null }
+      } catch { [pscustomobject]@{ Row = $f.Row; Msgs = @(); Err = $_.Exception.Message } }
+    })
+
+    foreach ($r in ($res | Where-Object { $_ })) {
+      if ($r.Err) { $r.Row.NodeWarnings = '(could not read run)'; continue }
+      $r.Row.NodeWarnings     = [string]@($r.Msgs).Count
+      $r.Row.NodeWarningTasks = Get-NodeSummary $r.Msgs
+    }
+    $hit = @($res | Where-Object { $_ -and @($_.Msgs).Count -gt 0 }).Count
+    Write-Host "  $hit latest runs have Node.js warnings."
+  }
+}
+
+$sorted = @($rows | Sort-Object Project, Folder, Pipeline)
+
+# --- Pool summary ---
+$summary = @($sorted | ForEach-Object {
+    $r = $_
+    "$($r.PoolsUsed); $($r.ConfiguredPools)" -split ';\s*' | Where-Object { $_ } | Sort-Object -Unique |
+      ForEach-Object { [pscustomobject]@{ Pool = $_; Name = "$($r.Project) | $($r.Pipeline)" } }
+  } | Group-Object Pool | Sort-Object Count -Descending | ForEach-Object {
+    [pscustomobject]@{
+      Pool          = $_.Name
+      PipelineCount = $_.Count
+      Pipelines     = ($_.Group.Name | Sort-Object) -join "`n"
+    }
+  })
+
+# --- Excel output ---
+function Write-ComSheet($ws, [string]$name, $data) {
+  $ws.Name = $name
+  $data = @($data)
+  if ($data.Count -eq 0) { $ws.Cells.Item(1, 1).Value2 = '(no rows)'; return }
+  $cols = @($data[0].PSObject.Properties.Name)
+  $arr  = New-Object 'object[,]' ($data.Count + 1), $cols.Count
+  for ($c = 0; $c -lt $cols.Count; $c++) { $arr[0, $c] = $cols[$c] }
+  for ($r = 0; $r -lt $data.Count; $r++) {
+    for ($c = 0; $c -lt $cols.Count; $c++) { $arr[($r + 1), $c] = [string]$data[$r].($cols[$c]) }
+  }
+  $ws.Cells.NumberFormat = '@'   # keep everything as text (folder paths, names)
+  $rng = $ws.Range($ws.Cells.Item(1, 1), $ws.Cells.Item($data.Count + 1, $cols.Count))
+  $rng.Value2 = $arr
+  $rng.Font.Name = 'Arial'
+  $rng.Font.Size = 10
+  $rng.VerticalAlignment = -4160          # top
+  $hdr = $ws.Range($ws.Cells.Item(1, 1), $ws.Cells.Item(1, $cols.Count))
+  $hdr.Font.Bold = $true
+  $hdr.Interior.Color = 0x47331F          # dark navy (BGR)
+  $hdr.Font.Color = 0xFFFFFF
+  [void]$rng.AutoFilter()
+  [void]$ws.Columns.AutoFit()
+  for ($c = 1; $c -le $cols.Count; $c++) {
+    if ($ws.Columns.Item($c).ColumnWidth -gt 70) { $ws.Columns.Item($c).ColumnWidth = 70; $ws.Columns.Item($c).WrapText = $true }
+  }
+  try {
+    $ws.Activate()
+    $ws.Application.ActiveWindow.SplitRow = 1
+    $ws.Application.ActiveWindow.FreezePanes = $true
+  } catch { }
+}
+
+function Export-Workbook($Path) {
+  $full = [IO.Path]::GetFullPath($Path)
+  if (Test-Path $full) { Remove-Item $full -Force }
+
+  if (Get-Module -ListAvailable -Name ImportExcel) {
+    Import-Module ImportExcel
+    $sorted  | Export-Excel $full -WorksheetName 'Pipelines'    -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow
+    $summary | Export-Excel $full -WorksheetName 'Pool Summary' -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow
+    return $full
+  }
+
+  $xl = $null
+  try { $xl = New-Object -ComObject Excel.Application } catch { return $null }
+  try {
+    $xl.Visible = $false
+    $xl.DisplayAlerts = $false
+    $wb = $xl.Workbooks.Add()
+    while ($wb.Worksheets.Count -lt 2) { [void]$wb.Worksheets.Add([Type]::Missing, $wb.Worksheets.Item($wb.Worksheets.Count)) }
+    while ($wb.Worksheets.Count -gt 2) { $wb.Worksheets.Item($wb.Worksheets.Count).Delete() }
+    Write-ComSheet $wb.Worksheets.Item(1) 'Pipelines'    $sorted
+    Write-ComSheet $wb.Worksheets.Item(2) 'Pool Summary' $summary
+    $wb.Worksheets.Item(1).Activate()
+    $wb.SaveAs($full, 51)   # 51 = .xlsx
+    $wb.Close($false)
+    return $full
+  } finally {
+    $xl.Quit()
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+  }
+}
+
+$saved = Export-Workbook $OutFile
+if (-not $saved) {
+  $saved = [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($OutFile), '.csv')
+  $sorted | Export-Csv $saved -NoTypeInformation
+  Write-Warning "Excel and the ImportExcel module weren't available, so the result was saved as CSV."
+}
+
+# --- Console summary ---
+$summary | Format-Table Pool, PipelineCount -AutoSize
+foreach ($projId in $projInfo.Keys) {
+  $n = @($sorted | Where-Object Project -eq $projInfo[$projId]).Count
+  Write-Host ("{0}: {1} pipelines; job history goes back to {2}" -f $projInfo[$projId], $n, $oldest[$projId])
+}
+Write-Host "Saved: $saved"
+```
 
