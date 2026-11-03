@@ -28,6 +28,11 @@
     NodeWarnings    - only with -NodeWarnings: number of Node.js-related warnings in the latest run
                       (0 = checked, none found; blank = not checked: no run, or older than -Since)
     NodeWarningTasks- the tasks behind those warnings, e.g. AzureCLI@2 (Node 10)
+    LowestNodeRunner- only with -NodeWarnings: oldest Node.js runner any task in the latest run uses
+                      (Node 6/10/16 = breaks or changes behaviour after Nov 24 2026; Node 20/24 = OK)
+    TaskRunners     - every task in the latest run with the runner it uses, oldest first,
+                      e.g. AzureCLI@1.0.1=Node 10; CopyFiles@2.246.0=Node 20; PowerShell@2.247.1=Node 20
+    LatestRunAgents - agent(s) that ran the latest run
     PoolsUsed       - every pool any run used in the job-history window, most recent first
     PoolLastUsed    - same pools with the date each was last used
     ConfiguredPools - pools set on the definition (classic build phases, classic release stages)
@@ -106,6 +111,37 @@ function Get-NodeSummary($msgs) {
   @($items | Sort-Object -Unique) -join '; '
 }
 
+# Node.js runner helpers: execution handler name -> Node version
+function Get-HandlerNode([string]$h) {
+  switch -Regex ($h) {
+    '^Node$'   { return 6 }
+    '^Node10'  { return 10 }
+    '^Node16'  { return 16 }
+    '^Node20'  { return 20 }
+    '^Node24'  { return 24 }
+    default    { return $null }
+  }
+}
+# The agent runs a task on the newest Node handler the task declares
+function Get-BestRunner($handlers) {
+  $hs = @($handlers | Where-Object { $_ })
+  if ($hs.Count -eq 0) { return [pscustomobject]@{ Node = $null; Label = 'unknown' } }
+  $nodes = @($hs | ForEach-Object { Get-HandlerNode $_ } | Where-Object { $_ })
+  if ($nodes.Count) {
+    $n = ($nodes | Measure-Object -Maximum).Maximum
+    return [pscustomobject]@{ Node = $n; Label = "Node $n" }
+  }
+  [pscustomobject]@{ Node = $null; Label = $hs[0] }   # e.g. PowerShell3, Process
+}
+function Get-TaskHandlers($id, [string]$ver) {
+  $k = "$id|$ver".ToLower()
+  if ($taskCat.ContainsKey($k)) { return $taskCat[$k] }
+  $maj = ($ver -split '\.')[0]
+  $k2 = "$id|$maj".ToLower()
+  if ($taskCatMajor.ContainsKey($k2)) { return $taskCatMajor[$k2].Handlers }
+  $null
+}
+
 function Get-RunCols($key) {
   $lr = $latest[$key]
   [pscustomobject]@{
@@ -116,6 +152,26 @@ function Get-RunCols($key) {
     LatestRunPools = if ($lr) { Join-Set $lr.Pools } else { '' }
     LatestRunId    = if ($lr) { $lr.Id } else { $null }
   }
+}
+
+# --- Task catalog (which Node runner each task version declares), only with -NodeWarnings ---
+$taskCat = @{}; $taskCatMajor = @{}
+if ($NodeWarnings) {
+  Write-Host "Reading task catalog for $Org..."
+  try {
+    $tasks = (Invoke-RestMethod -Uri "$base/_apis/distributedtask/tasks?allVersions=true&api-version=7.1" -Headers $H).value
+    foreach ($t in $tasks) {
+      $vs = "$($t.version.major).$($t.version.minor).$($t.version.patch)"
+      $hs = if ($t.execution) { @($t.execution.PSObject.Properties.Name) } else { @() }
+      $taskCat["$($t.id)|$vs".ToLower()] = $hs
+      $mk = "$($t.id)|$($t.version.major)".ToLower()
+      $rank = [long]$t.version.minor * 100000 + [long]$t.version.patch
+      if (-not $taskCatMajor.ContainsKey($mk) -or $rank -gt $taskCatMajor[$mk].Rank) {
+        $taskCatMajor[$mk] = @{ Rank = $rank; Handlers = $hs }
+      }
+    }
+    Write-Host "  $($taskCat.Count) task versions loaded."
+  } catch { Write-Warning "Task catalog not read, runner columns will say 'unknown': $($_.Exception.Message)" }
 }
 
 # --- Resolve projects ---
@@ -223,6 +279,9 @@ foreach ($projId in $projInfo.Keys) {
       LatestRunReason = ''
       NodeWarnings    = ''
       NodeWarningTasks = ''
+      LowestNodeRunner = ''
+      TaskRunners     = ''
+      LatestRunAgents = ''
       PoolsUsed       = $rc.PoolsUsed
       PoolLastUsed    = $rc.PoolLastUsed
       ConfiguredPools = Join-Set $cfg
@@ -274,6 +333,9 @@ foreach ($projId in $projInfo.Keys) {
       LatestRunReason = ''
       NodeWarnings    = ''
       NodeWarningTasks = ''
+      LowestNodeRunner = ''
+      TaskRunners     = ''
+      LatestRunAgents = ''
       PoolsUsed       = $rc.PoolsUsed
       PoolLastUsed    = $rc.PoolLastUsed
       ConfiguredPools = Join-Set $cfg
@@ -320,7 +382,10 @@ foreach ($projId in $projInfo.Keys) {
         $tl = Invoke-RestMethod -Uri "$($using:b)/$($using:pp)/_apis/build/builds/$($f.Id)/timeline?api-version=7.1" -Headers $using:hd
         $msgs = @($tl.records | ForEach-Object { $_.issues } |
           Where-Object { $_ -and $_.type -eq 'warning' -and $_.message -match 'node' } | ForEach-Object { $_.message })
-        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Err = $null }
+        $agents = @($tl.records | Where-Object { $_.type -eq 'Job' -and $_.workerName } | ForEach-Object { $_.workerName })
+        $tasks  = @($tl.records | Where-Object { $_.type -eq 'Task' -and $_.task } |
+          ForEach-Object { "$($_.task.id)|$($_.task.version)|$($_.task.name)" })
+        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Agents = $agents; Tasks = $tasks; Err = $null }
       } catch { [pscustomobject]@{ Row = $f.Row; Msgs = @(); Err = $_.Exception.Message } }
     })
 
@@ -328,12 +393,16 @@ foreach ($projId in $projInfo.Keys) {
       $f = $_
       try {
         $rel = Invoke-RestMethod -Uri "$($using:v)/$($using:pp)/_apis/release/releases/$($f.Id)?api-version=7.1" -Headers $using:hd
-        $msgs = @(foreach ($e in @($rel.environments)) { foreach ($ds in @($e.deploySteps)) { foreach ($ph in @($ds.releaseDeployPhases)) {
-          foreach ($dj in @($ph.deploymentJobs)) {
+        $jobs = @(foreach ($e in @($rel.environments)) { foreach ($ds in @($e.deploySteps)) { foreach ($ph in @($ds.releaseDeployPhases)) {
+          foreach ($dj in @($ph.deploymentJobs)) { $dj } } } })
+        $msgs = @(foreach ($dj in $jobs) {
             foreach ($i in (@($dj.job.issues) + @($dj.tasks | ForEach-Object { $_.issues }))) {
               if ($i -and "$($i.issueType)$($i.type)" -match 'warning' -and $i.message -match 'node') { $i.message }
-            } } } } })
-        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Err = $null }
+            } })
+        $agents = @($jobs | ForEach-Object { $_.job.agentName } | Where-Object { $_ })
+        $tasks  = @($jobs | ForEach-Object { $_.tasks } | Where-Object { $_ -and $_.task } |
+          ForEach-Object { "$($_.task.id)|$($_.task.version)|$($_.task.name)" })
+        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Agents = $agents; Tasks = $tasks; Err = $null }
       } catch { [pscustomobject]@{ Row = $f.Row; Msgs = @(); Err = $_.Exception.Message } }
     })
 
@@ -341,9 +410,24 @@ foreach ($projId in $projInfo.Keys) {
       if ($r.Err) { $r.Row.NodeWarnings = '(could not read run)'; continue }
       $r.Row.NodeWarnings     = [string]@($r.Msgs).Count
       $r.Row.NodeWarningTasks = Get-NodeSummary $r.Msgs
+      $r.Row.LatestRunAgents  = (@($r.Agents) | Sort-Object -Unique) -join '; '
+
+      $runners = @(foreach ($tk in (@($r.Tasks) | Sort-Object -Unique)) {
+          $parts = $tk -split '\|', 3
+          $best  = Get-BestRunner (Get-TaskHandlers $parts[0] $parts[1])
+          [pscustomobject]@{ Task = "$($parts[2])@$($parts[1])"; Node = $best.Node; Label = $best.Label }
+        })
+      if ($runners.Count) {
+        $r.Row.TaskRunners = ($runners | Sort-Object @{ e = { if ($_.Node) { $_.Node } else { 99 } } }, Task |
+          ForEach-Object { "$($_.Task)=$($_.Label)" }) -join '; '
+        $min = @($runners | Where-Object { $_.Node }) | Measure-Object Node -Minimum
+        $r.Row.LowestNodeRunner = if ($min.Count) { "Node $($min.Minimum)" } else { '(no Node tasks)' }
+      }
     }
     $hit = @($res | Where-Object { $_ -and @($_.Msgs).Count -gt 0 }).Count
     Write-Host "  $hit latest runs have Node.js warnings."
+    $res | Where-Object { $_ -and $_.Row.LowestNodeRunner } | Group-Object { $_.Row.LowestNodeRunner } |
+      Sort-Object Name | ForEach-Object { Write-Host ("    Lowest runner {0}: {1} runs" -f $_.Name, $_.Count) }
   }
 }
 
