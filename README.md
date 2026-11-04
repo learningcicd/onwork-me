@@ -43,10 +43,10 @@
   If neither is available it falls back to a .csv with the same columns.
 
 .EXAMPLE
-  .\pipelines-pool-map.ps1 -Project "RxI-Integration"
-  .\pipelines-pool-map.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
-  .\pipelines-pool-map.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
-  .\pipelines-pool-map.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
+  .\nodejswarningspools.ps1 -Project "RxI-Integration"
+  .\nodejswarningspools.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
+  .\nodejswarningspools.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
+  .\nodejswarningspools.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
 #>
 param(
   [Parameter(Mandatory)][string[]]$Project,
