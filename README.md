@@ -43,20 +43,28 @@
   If neither is available it falls back to a .csv with the same columns.
 
 .EXAMPLE
-  .\nodejswarningspools.ps1 -Project "RxI-Integration"
-  .\nodejswarningspools.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
-  .\nodejswarningspools.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
-  .\nodejswarningspools.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
+  .\noderunners.ps1 -Project "RxI-Integration"
+  .\noderunners.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
+  .\noderunners.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
+  .\noderunners.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
 #>
 param(
   [Parameter(Mandatory)][string[]]$Project,
   [string]$Org = 'Rx-Renewal',
   [int]$JobHistory = 5000,
   [string]$OutFile,
-  [switch]$NodeWarnings,     # also check each latest run for Node.js warnings
-  [string]$Since = ''        # with -NodeWarnings: only check runs on/after this date, e.g. 2026-07-01
+  [switch]$NodeWarnings,     # kept for compatibility: the Node.js check is now ON by default
+  [switch]$SkipNodeCheck,    # turn the Node.js warning / runner check off (faster)
+  [string]$Since = ''        # only check runs on/after this date, e.g. 2026-07-01 (blank = all runs)
 )
 $ErrorActionPreference = 'Stop'
+$NodeWarnings = -not $SkipNodeCheck
+if ($NodeWarnings) {
+  $sinceMsg = if ($Since) { "latest runs since $Since" } else { 'all latest runs (use -Since 2026-07-01 to limit)' }
+  Write-Host "Node.js check: ON - $sinceMsg" -ForegroundColor Cyan
+} else {
+  Write-Host "Node.js check: OFF (-SkipNodeCheck)" -ForegroundColor Yellow
+}
 if (-not $OutFile) {
   $tag = if ($Project.Count -eq 1) { $Project[0] -replace '[^\w-]', '_' } else { "$($Project.Count)-projects" }
   $OutFile = ".\pipeline-pools-$tag.xlsx"
@@ -480,7 +488,7 @@ function Write-ComSheet($ws, [string]$name, $data) {
 }
 
 function Export-Workbook($Path) {
-  $full = [IO.Path]::GetFullPath($Path)
+  $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
   if (Test-Path $full) { Remove-Item $full -Force }
 
   if (Get-Module -ListAvailable -Name ImportExcel) {
@@ -512,7 +520,7 @@ function Export-Workbook($Path) {
 
 $saved = Export-Workbook $OutFile
 if (-not $saved) {
-  $saved = [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($OutFile), '.csv')
+  $saved = [IO.Path]::ChangeExtension($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutFile), '.csv')
   $sorted | Export-Csv $saved -NoTypeInformation
   Write-Warning "Excel and the ImportExcel module weren't available, so the result was saved as CSV."
 }
