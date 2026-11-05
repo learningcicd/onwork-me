@@ -43,10 +43,10 @@
   If neither is available it falls back to a .csv with the same columns.
 
 .EXAMPLE
-  .\noderunners.ps1 -Project "RxI-Integration"
-  .\noderunners.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
-  .\noderunners.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
-  .\noderunners.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
+  .\ado-node-runner-report.ps1 -Project "RxI-Integration"
+  .\ado-node-runner-report.ps1 -Project "RxI-DevOps-Deployment","RxI-Integration","RxR-SCM"
+  .\ado-node-runner-report.ps1 -Project "RxR-SCM" -NodeWarnings -Since 2026-07-01
+  .\ado-node-runner-report.ps1 -Project "RxR-SCM" -OutFile .\scm-pools.xlsx -JobHistory 10000
 #>
 param(
   [Parameter(Mandatory)][string[]]$Project,
@@ -141,11 +141,40 @@ function Get-BestRunner($handlers) {
   }
   [pscustomobject]@{ Node = $null; Label = $hs[0] }   # e.g. PowerShell3, Process
 }
+# Load one task's definitions (all versions) the first time we see it, then cache
+function Import-TaskDefinition($id) {
+  $id = "$id".ToLower()
+  if ($taskLoaded.ContainsKey($id)) { return }
+  $taskLoaded[$id] = $true
+  try {
+    $defs = (Invoke-RestMethod -Uri "$base/_apis/distributedtask/tasks/$($id)?allVersions=true&api-version=7.1" -Headers $H).value
+    foreach ($t in @($defs)) {
+      $hs = @()
+      foreach ($sec in 'execution', 'prejobexecution', 'postjobexecution') {
+        if ($t.$sec) { $hs += @($t.$sec.PSObject.Properties.Name) }
+      }
+      $hs = @($hs | Sort-Object -Unique)
+      $vs = "$($t.version.major).$($t.version.minor).$($t.version.patch)"
+      $taskCat["$id|$vs"] = $hs
+      $mk = "$id|$($t.version.major)"
+      $rank = [long]$t.version.minor * 100000 + [long]$t.version.patch
+      if (-not $taskCatMajor.ContainsKey($mk) -or $rank -gt $taskCatMajor[$mk].Rank) {
+        $taskCatMajor[$mk] = @{ Rank = $rank; Handlers = $hs }
+      }
+    }
+    if (-not @($defs).Count) { $script:taskMissing++ }
+  } catch {
+    $script:taskMissing++
+    if (-not $script:taskErrShown) { Write-Warning "Task definition not read ($id): $($_.Exception.Message)"; $script:taskErrShown = $true }
+  }
+}
 function Get-TaskHandlers($id, [string]$ver) {
-  $k = "$id|$ver".ToLower()
-  if ($taskCat.ContainsKey($k)) { return $taskCat[$k] }
+  Import-TaskDefinition $id
+  $id = "$id".ToLower()
+  $k = "$id|$ver"
+  if ($taskCat.ContainsKey($k) -and @($taskCat[$k]).Count) { return $taskCat[$k] }
   $maj = ($ver -split '\.')[0]
-  $k2 = "$id|$maj".ToLower()
+  $k2 = "$id|$maj"
   if ($taskCatMajor.ContainsKey($k2)) { return $taskCatMajor[$k2].Handlers }
   $null
 }
@@ -162,32 +191,22 @@ function Get-RunCols($key) {
   }
 }
 
-# --- Task catalog (which Node runner each task version declares), only with -NodeWarnings ---
-$taskCat = @{}; $taskCatMajor = @{}
-if ($NodeWarnings) {
-  Write-Host "Reading task catalog for $Org..."
-  try {
-    $tasks = (Invoke-RestMethod -Uri "$base/_apis/distributedtask/tasks?allVersions=true&api-version=7.1" -Headers $H).value
-    foreach ($t in $tasks) {
-      $vs = "$($t.version.major).$($t.version.minor).$($t.version.patch)"
-      $hs = if ($t.execution) { @($t.execution.PSObject.Properties.Name) } else { @() }
-      $taskCat["$($t.id)|$vs".ToLower()] = $hs
-      $mk = "$($t.id)|$($t.version.major)".ToLower()
-      $rank = [long]$t.version.minor * 100000 + [long]$t.version.patch
-      if (-not $taskCatMajor.ContainsKey($mk) -or $rank -gt $taskCatMajor[$mk].Rank) {
-        $taskCatMajor[$mk] = @{ Rank = $rank; Handlers = $hs }
-      }
-    }
-    Write-Host "  $($taskCat.Count) task versions loaded."
-  } catch { Write-Warning "Task catalog not read, runner columns will say 'unknown': $($_.Exception.Message)" }
-}
+# --- Task definitions cache (which Node runner each task version declares); loaded per task on demand ---
+$taskCat = @{}; $taskCatMajor = @{}; $taskLoaded = @{}
+$script:taskMissing = 0; $script:taskErrShown = $false
 
 # --- Resolve projects ---
 $projInfo = @{}   # projectId -> name
 foreach ($name in $Project) {
-  $pr = Invoke-RestMethod -Uri "$base/_apis/projects/$([uri]::EscapeDataString($name))?api-version=7.1" -Headers $H
-  $projInfo[$pr.id] = $pr.name
+  try {
+    $pr = Invoke-RestMethod -Uri "$base/_apis/projects/$([uri]::EscapeDataString($name))?api-version=7.1" -Headers $H
+    $projInfo[$pr.id] = $pr.name
+    Write-Host "Project found: $($pr.name)"
+  } catch {
+    Write-Warning "Skipping project '$name': it doesn't exist under this name, or you don't have access to it."
+  }
 }
+if ($projInfo.Count -eq 0) { throw "None of the projects could be read. Check the names with: az devops project list --org $base --query `"value[].name`" -o tsv" }
 
 # --- Observed: which pools each pipeline's jobs ran on (read once for all projects) ---
 Write-Host "Reading job history from every pool in $Org (this can take a minute)..."
@@ -384,7 +403,11 @@ foreach ($projId in $projInfo.Keys) {
     Write-Host "  Checking $($bT.Count + $rT.Count) latest runs for Node.js warnings..."
     $b = $base; $v = $vsrm; $hd = $H; $pp = $p
 
-    $res = @($bT | ForEach-Object -ThrottleLimit 8 -Parallel {
+    $rowMap = @{}
+    $bIn = @(foreach ($f in $bT) { $k = "b$($f.Id)"; $rowMap[$k] = $f.Row; [pscustomobject]@{ Key = $k; Id = [string]$f.Id } })
+    $rIn = @(foreach ($f in $rT) { $k = "r$($f.Id)"; $rowMap[$k] = $f.Row; [pscustomobject]@{ Key = $k; Id = [string]$f.Id } })
+
+    $res = @($bIn | ForEach-Object -ThrottleLimit 8 -Parallel {
       $f = $_
       try {
         $tl = Invoke-RestMethod -Uri "$($using:b)/$($using:pp)/_apis/build/builds/$($f.Id)/timeline?api-version=7.1" -Headers $using:hd
@@ -393,11 +416,11 @@ foreach ($projId in $projInfo.Keys) {
         $agents = @($tl.records | Where-Object { $_.type -eq 'Job' -and $_.workerName } | ForEach-Object { $_.workerName })
         $tasks  = @($tl.records | Where-Object { $_.type -eq 'Task' -and $_.task } |
           ForEach-Object { "$($_.task.id)|$($_.task.version)|$($_.task.name)" })
-        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Agents = $agents; Tasks = $tasks; Err = $null }
-      } catch { [pscustomobject]@{ Row = $f.Row; Msgs = @(); Err = $_.Exception.Message } }
+        [pscustomobject]@{ Key = $f.Key; Msgs = $msgs; Agents = $agents; Tasks = $tasks; Err = $null }
+      } catch { [pscustomobject]@{ Key = $f.Key; Msgs = @(); Agents = @(); Tasks = @(); Err = $_.Exception.Message } }
     })
 
-    $res += @($rT | ForEach-Object -ThrottleLimit 8 -Parallel {
+    $res += @($rIn | ForEach-Object -ThrottleLimit 8 -Parallel {
       $f = $_
       try {
         $rel = Invoke-RestMethod -Uri "$($using:v)/$($using:pp)/_apis/release/releases/$($f.Id)?api-version=7.1" -Headers $using:hd
@@ -410,31 +433,58 @@ foreach ($projId in $projInfo.Keys) {
         $agents = @($jobs | ForEach-Object { $_.job.agentName } | Where-Object { $_ })
         $tasks  = @($jobs | ForEach-Object { $_.tasks } | Where-Object { $_ -and $_.task } |
           ForEach-Object { "$($_.task.id)|$($_.task.version)|$($_.task.name)" })
-        [pscustomobject]@{ Row = $f.Row; Msgs = $msgs; Agents = $agents; Tasks = $tasks; Err = $null }
-      } catch { [pscustomobject]@{ Row = $f.Row; Msgs = @(); Err = $_.Exception.Message } }
+        [pscustomobject]@{ Key = $f.Key; Msgs = $msgs; Agents = $agents; Tasks = $tasks; Err = $null }
+      } catch { [pscustomobject]@{ Key = $f.Key; Msgs = @(); Agents = @(); Tasks = @(); Err = $_.Exception.Message } }
     })
 
-    foreach ($r in ($res | Where-Object { $_ })) {
-      if ($r.Err) { $r.Row.NodeWarnings = '(could not read run)'; continue }
-      $r.Row.NodeWarnings     = [string]@($r.Msgs).Count
-      $r.Row.NodeWarningTasks = Get-NodeSummary $r.Msgs
-      $r.Row.LatestRunAgents  = (@($r.Agents) | Sort-Object -Unique) -join '; '
+    $res  = @($res | Where-Object { $_ })
+    $errs = @($res | Where-Object { $_.Err })
+    Write-Host "  Got details for $($res.Count - $errs.Count) runs; $($errs.Count) could not be read."
+    if ($errs.Count) { Write-Warning "First error: $($errs[0].Err)" }
 
-      $runners = @(foreach ($tk in (@($r.Tasks) | Sort-Object -Unique)) {
+    foreach ($x in $res) {
+      $row = $rowMap[$x.Key]
+      if (-not $row) { continue }
+      if ($x.Err) { $row.NodeWarnings = '(could not read run)'; continue }
+      $row.NodeWarnings     = [string]@($x.Msgs).Count
+      $row.NodeWarningTasks = Get-NodeSummary $x.Msgs
+      $row.LatestRunAgents  = (@($x.Agents) | Sort-Object -Unique) -join '; '
+
+      # Node version named in this run's warnings, per task name (fallback when the definition has no handler info)
+      $warnNode = @{}
+      $taskNames = @(@($x.Tasks) | ForEach-Object { ($_ -split '\|', 3)[2] } | Where-Object { $_ } | Sort-Object -Unique)
+      foreach ($m in @($x.Msgs)) {
+        $m = [string]$m
+        if ($m -notmatch 'Node(?:\.js)?\s*(?:version\s*)?\(?\s*(?<n>\d+)') { continue }
+        $n = [int]$Matches.n
+        foreach ($tn in $taskNames) {
+          if ($m -match "(?i)\b$([regex]::Escape($tn))\b") {
+            if (-not $warnNode.ContainsKey($tn) -or $n -lt $warnNode[$tn]) { $warnNode[$tn] = $n }
+          }
+        }
+      }
+
+      $runners = @(foreach ($tk in (@($x.Tasks) | Sort-Object -Unique)) {
           $parts = $tk -split '\|', 3
           $best  = Get-BestRunner (Get-TaskHandlers $parts[0] $parts[1])
-          [pscustomobject]@{ Task = "$($parts[2])@$($parts[1])"; Node = $best.Node; Label = $best.Label }
+          $node = $best.Node; $label = $best.Label
+          if (-not $node -and $warnNode.ContainsKey($parts[2])) { $node = $warnNode[$parts[2]]; $label = "Node $node (from warning)" }
+          [pscustomobject]@{ Task = "$($parts[2])@$($parts[1])"; Node = $node; Label = $label }
         })
       if ($runners.Count) {
-        $r.Row.TaskRunners = ($runners | Sort-Object @{ e = { if ($_.Node) { $_.Node } else { 99 } } }, Task |
+        $row.TaskRunners = ($runners | Sort-Object @{ e = { if ($_.Node) { $_.Node } else { 99 } } }, Task |
           ForEach-Object { "$($_.Task)=$($_.Label)" }) -join '; '
         $min = @($runners | Where-Object { $_.Node }) | Measure-Object Node -Minimum
-        $r.Row.LowestNodeRunner = if ($min.Count) { "Node $($min.Minimum)" } else { '(no Node tasks)' }
+        $row.LowestNodeRunner = if ($min.Count) { "Node $($min.Minimum)" }
+          elseif (@($runners | Where-Object { $_.Label -ne 'unknown' }).Count) { '(no Node tasks)' }
+          else { '(runner unknown)' }
       }
     }
-    $hit = @($res | Where-Object { $_ -and @($_.Msgs).Count -gt 0 }).Count
+    $withH = @($taskCat.Values | Where-Object { @($_).Count -gt 0 }).Count
+    Write-Host "  Task definitions loaded: $($taskLoaded.Count) tasks, $withH of $($taskCat.Count) versions have runner info ($script:taskMissing not readable)."
+    $hit = @($res | Where-Object { @($_.Msgs).Count -gt 0 }).Count
     Write-Host "  $hit latest runs have Node.js warnings."
-    $res | Where-Object { $_ -and $_.Row.LowestNodeRunner } | Group-Object { $_.Row.LowestNodeRunner } |
+    $rowMap.Values | Where-Object { $_.LowestNodeRunner } | Group-Object LowestNodeRunner |
       Sort-Object Name | ForEach-Object { Write-Host ("    Lowest runner {0}: {1} runs" -f $_.Name, $_.Count) }
   }
 }
