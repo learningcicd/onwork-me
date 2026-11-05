@@ -14,6 +14,7 @@
   Workbook sheets:
     Pipelines     - one row per pipeline definition (all folders, including never-run/disabled ones)
     Pool Summary  - one row per pool: how many pipelines use it, and which
+    UniqueTaskRunners - every distinct value from the TaskRunners column (e.g. Bash@3.279.0=Node 20), one per row
 
   Pipelines columns:
     Project, Type, Pipeline
@@ -449,7 +450,17 @@ foreach ($projId in $projInfo.Keys) {
     foreach ($x in $res) {
       $row = $rowMap[$x.Key]
       if (-not $row) { continue }
-      if ($x.Err) { $row.NodeWarnings = '(could not read run)'; continue }
+      if ($x.Err) {
+        $why = switch -Regex ($x.Err) {
+          '404|NotFound|does not exist|not found' { 'run deleted (retention)'; break }
+          '401|403|Unauthorized|Forbidden|permission' { 'no permission'; break }
+          '429|TooManyRequests|throttl'            { 'throttled, rerun'; break }
+          'timed out|timeout'                       { 'timed out, rerun'; break }
+          default { ($x.Err -replace '\s+', ' ').Substring(0, [Math]::Min(80, ($x.Err -replace '\s+', ' ').Length)) }
+        }
+        $row.NodeWarnings = "(could not read run: $why)"
+        continue
+      }
       $row.NodeWarnings     = [string]@($x.Msgs).Count
       $row.NodeWarningTasks = Get-NodeSummary $x.Msgs
       $row.LatestRunAgents  = (@($x.Agents) | Sort-Object -Unique) -join '; '
@@ -494,6 +505,11 @@ foreach ($projId in $projInfo.Keys) {
 }
 
 $sorted = @($rows | Sort-Object Project, Folder, Pipeline)
+
+# --- Unique task runners: every distinct entry from the TaskRunners column, one per row ---
+$uniqueRunners = @($sorted | Where-Object { $_.TaskRunners } |
+  ForEach-Object { $_.TaskRunners -split ';\s*' } | Where-Object { $_ } |
+  Sort-Object -Unique | ForEach-Object { [pscustomobject]@{ TaskRunner = $_ } })
 
 # --- Pool summary ---
 $summary = @($sorted | ForEach-Object {
@@ -557,6 +573,7 @@ function Export-Workbook($Path) {
     Import-Module ImportExcel
     $sorted  | Export-Excel $full -WorksheetName 'Pipelines'    -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow
     $summary | Export-Excel $full -WorksheetName 'Pool Summary' -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow
+    if ($uniqueRunners.Count) { $uniqueRunners | Export-Excel $full -WorksheetName 'UniqueTaskRunners' -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow }
     return $full
   }
 
@@ -566,10 +583,11 @@ function Export-Workbook($Path) {
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
     $wb = $xl.Workbooks.Add()
-    while ($wb.Worksheets.Count -lt 2) { [void]$wb.Worksheets.Add([Type]::Missing, $wb.Worksheets.Item($wb.Worksheets.Count)) }
-    while ($wb.Worksheets.Count -gt 2) { $wb.Worksheets.Item($wb.Worksheets.Count).Delete() }
-    Write-ComSheet $wb.Worksheets.Item(1) 'Pipelines'    $sorted
-    Write-ComSheet $wb.Worksheets.Item(2) 'Pool Summary' $summary
+    while ($wb.Worksheets.Count -lt 3) { [void]$wb.Worksheets.Add([Type]::Missing, $wb.Worksheets.Item($wb.Worksheets.Count)) }
+    while ($wb.Worksheets.Count -gt 3) { $wb.Worksheets.Item($wb.Worksheets.Count).Delete() }
+    Write-ComSheet $wb.Worksheets.Item(1) 'Pipelines'         $sorted
+    Write-ComSheet $wb.Worksheets.Item(2) 'Pool Summary'      $summary
+    Write-ComSheet $wb.Worksheets.Item(3) 'UniqueTaskRunners' $uniqueRunners
     $wb.Worksheets.Item(1).Activate()
     $wb.SaveAs($full, 51)   # 51 = .xlsx
     $wb.Close($false)
