@@ -16,7 +16,9 @@
     Pool Summary  - one row per pool: how many pipelines use it, and which
 
   Pipelines columns:
-    Project, Type, Pipeline, Folder
+    Project, Type, Pipeline
+    PipelineUrl     - full link to the pipeline in Azure DevOps (clickable)
+    Folder
     LatestRunPools  - pools used by the most recent run (what the pipeline uses today)
     LatestRun       - that run's number/name
     LatestRunDate   - when that run's last job finished (local time, yyyy-MM-dd HH:mm).
@@ -298,6 +300,7 @@ foreach ($projId in $projInfo.Keys) {
       Project         = $projName
       Type            = if ($isYaml) { 'YAML' } else { 'Classic build' }
       Pipeline        = $d.name
+      PipelineUrl     = "$base/$($p)/_build?definitionId=$($d.id)"
       Folder          = $d.path
       LatestRunPools  = $rc.LatestRunPools
       LatestRun       = $rc.LatestRun
@@ -352,6 +355,7 @@ foreach ($projId in $projInfo.Keys) {
       Project         = $projName
       Type            = 'Classic release'
       Pipeline        = $full.name
+      PipelineUrl     = "$base/$($p)/_release?_a=releases&view=all&definitionId=$($rd.id)"
       Folder          = $full.path
       LatestRunPools  = $rc.LatestRunPools
       LatestRun       = $rc.LatestRun
@@ -525,6 +529,14 @@ function Write-ComSheet($ws, [string]$name, $data) {
   $hdr.Font.Bold = $true
   $hdr.Interior.Color = 0x47331F          # dark navy (BGR)
   $hdr.Font.Color = 0xFFFFFF
+  # Make the PipelineUrl column clickable
+  $urlCol = [array]::IndexOf($cols, 'PipelineUrl') + 1
+  if ($urlCol -gt 0) {
+    for ($r = 0; $r -lt $data.Count; $r++) {
+      $u = [string]$data[$r].PipelineUrl
+      if ($u) { [void]$ws.Hyperlinks.Add($ws.Cells.Item($r + 2, $urlCol), $u, '', $u, $u) }
+    }
+  }
   [void]$rng.AutoFilter()
   [void]$ws.Columns.AutoFit()
   for ($c = 1; $c -le $cols.Count; $c++) {
