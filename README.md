@@ -6,48 +6,40 @@
 
 ```bash
 {
-  "parameters": {
-    "principalName": {
-      "value": "rxr-rxi-prod-01-cus-adf"
-    },
-    "principalId": {
-      "value": "4e95ba3f-f8c1-4749-99a7-73f712c18283"
-    },
-    "resourceRoleAssignments": {
-      "value": [
-        {
-          "resourceGroup": "rxr-rxi-prod-cus-FunctionApps-rg",
-          "resourceType": "Microsoft.Storage/storageAccounts",
-          "resourceName": "rxrrxiprodcusfuncstrg05",
-          "roleDefinitionNames": [
-            "Storage Table Data Reader"
-          ]
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+    "contentVersion": "2.0.0.1",
+    "parameters": {
+        "principalName": {
+            "value": "rxi-flag-api-e2e-02-identity",
+            "metadata": {
+                "description": "[REQUIRED] https://dev.azure.com/WBA/IT%20Services/_git/ccp-ent-infra-build?path=/library/role-assignment-service/PARAMETERS.md&version=GBmaster&_a=preview&anchor=%60parameters.principalname%60"
+            }
+        },
+        "principalId": {
+            "value": "dd45624b-7fc2-4cf9-904d-b74b0ee34daa",
+            "metadata": {
+                "description": "[REQUIRED] https://dev.azure.com/WBA/IT%20Services/_git/ccp-ent-infra-build?path=/library/role-assignment-service/PARAMETERS.md&version=GBmaster&_a=preview&anchor=%60parameters.principalId%60"
+            }
+        },
+        "resourceRoleAssignments": {
+            "value": [
+                {
+                    "resourceGroup": "rxr-rxi-nprod-cus-rg-functions",
+                    "resourceType": "Microsoft.Storage/storageAccounts",
+                    "resourceName": "rxrrxie2e02cusfuncstrg01",
+                    "roleDefinitionNames": [
+                        "Storage Table Data Reader"
+                    ]
+                }
+            ],
+            "metadata": {
+                "description": "[REQUIRED] https://dev.azure.com/WBA/IT%20Services/_git/ccp-ent-infra-build?path=/library/role-assignment-service/PARAMETERS.md&version=GBmaster&_a=preview&anchor=%60parameters.resourceRoleAssignments%60"
+            }
         }
-      ]
+    },
+    "deploymentParameters": {
+        "subscription": "rpu-nprod-rxrenewal-05",
+        "template": "role-assignment-service"
     }
-  },
-  "deploymentParameters": {
-    "subscription": "rpu-prod-rxrenewal-05",
-    "template": "role-assignment-service"
-  }
 }
-```
-Your file has a custom deploymentParameters block, so it can’t go straight to az deployment. Run this in your pwsh terminal: it reads the file, sets the subscription, pulls out the parameters section into a temp file, and deploys.
-
-powershell
-```
-
-$cfg = Get-Content .\prodadfroleassignment.json -Raw | ConvertFrom-Json
-
-az account set --subscription $cfg.deploymentParameters.subscription
-
-$tmp = New-TemporaryFile
-@{ parameters = $cfg.parameters } | ConvertTo-Json -Depth 10 | Set-Content $tmp
-
-az deployment sub create `
-  --location centralus `
-  --template-file ".\$($cfg.deploymentParameters.template).json" `
-  --parameters "@$tmp"
-
-Remove-Item $tmp
 ```
