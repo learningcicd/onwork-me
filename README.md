@@ -24,10 +24,10 @@ variables:
 
 steps:
 - bash: |
-    set -euo pipefail
+    set -uo pipefail
     mkdir -p "$(hiddenDir)"
     if [ -n "$(ls -A "$(hiddenDir)" 2>/dev/null)" ]; then
-      echo "##vso[task.logissue type=error]$(hiddenDir) is not empty. A previous run may not have restored cleanly - fix by hand before continuing."
+      echo "##vso[task.logissue type=error]$(hiddenDir) is not empty. A previous run did not restore cleanly - fix by hand before continuing (move its contents back into externals/, then remove it)."
       exit 1
     fi
 
@@ -38,6 +38,25 @@ steps:
       16) ABOVE="node24 node20_1" ;;
       10) ABOVE="node24 node20_1 node16" ;;
     esac
+
+    # Pre-flight: every folder we'd need to hide must actually be movable by
+    # this account before we touch anything. Moving a directory needs write
+    # permission on it (to remove entries while relocating/deleting it), not
+    # just on its parent - so check that explicitly rather than finding out
+    # mid-move and leaving the agent half-hidden.
+    BLOCKED=""
+    for d in $ABOVE; do
+      p="$(externalsDir)/$d"
+      if [ -d "$p" ] && [ ! -w "$p" ]; then
+        BLOCKED="$BLOCKED $d"
+        echo "##[error]Not writable by $(whoami): $p"
+        ls -ld "$p"
+      fi
+    done
+    if [ -n "$BLOCKED" ]; then
+      echo "##vso[task.logissue type=error]Aborting before hiding anything - this account can't move:$BLOCKED. Fix ownership/permissions on the agent (so the account running this job can write to these folders) and retry."
+      exit 1
+    fi
 
     for d in $ABOVE; do
       if [ -d "$(externalsDir)/$d" ]; then
@@ -205,6 +224,7 @@ steps:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
 # Always restore, even if the job was cancelled or a step above failed hard.
+# Puts the agent back to its default: node24 (and every other runner) visible.
 - bash: |
     set -uo pipefail
     shopt -s nullglob
@@ -217,9 +237,16 @@ steps:
     done
     [ "$moved" = "1" ] || echo "Nothing to restore."
     rmdir "$(hiddenDir)" 2>/dev/null || true
+
     echo "Externals now visible to the agent:"
     ls -1 "$(externalsDir)" | grep -i '^node' || true
-  displayName: 'Restore Node runners on agent'
+
+    if [ ! -d "$(externalsDir)/node24" ]; then
+      echo "##vso[task.logissue type=error]node24 is NOT present in $(externalsDir) after restore. The agent is NOT back to its Node 24 default - check $(hiddenDir) by hand before letting anything else run on this agent."
+      exit 1
+    fi
+    echo "Confirmed: node24 is back in place - agent is at its default."
+  displayName: 'Restore Node runners on agent (back to Node 24 default)'
   condition: always()
 ```
 {% endraw %}
