@@ -4,17 +4,8 @@
   displayName: Publish HTML report
   condition: succeededOrFailed()
   inputs:
-    targetPath: $(Build.SourcesDirectory)/reports/html   # your report folder
+    targetPath: $(Build.SourcesDirectory)/reports/report.html   # your htmlFilePath value
     artifact: html-report-$(System.JobAttempt)
-
-- bash: |
-    cat > "$(Agent.TempDirectory)/html-report.md" <<'EOF'
-    ## HTML report
-    Open the **Artifacts** list on this run, download `html-report-$(System.JobAttempt)`, and open `index.html`.
-    EOF
-    echo "##vso[task.uploadsummary]$(Agent.TempDirectory)/html-report.md"
-  displayName: Add report summary
-  condition: succeededOrFailed()
 
 ```
 {% endraw %}
