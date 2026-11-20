@@ -19,11 +19,6 @@ https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish
 ```yaml
 trigger: none
 
-parameters:
-- name: failBuild
-  type: boolean
-  default: false
-
 stages:
 - stage: NodeWarningCheck
   variables:
@@ -39,11 +34,6 @@ stages:
         echo '<html><body><h1>Test report</h1><p>$(Build.BuildNumber)</p></body></html>' > "$(Build.SourcesDirectory)/reports/report.html"
       displayName: Generate dummy report
 
-    - bash: |
-        if [ "${{ parameters.failBuild }}" = "True" ]; then exit 1; fi
-      displayName: Optional forced failure
-
-    # --- step under test ---
     - task: PublishPipelineArtifact@1
       displayName: Publish HTML report
       condition: succeededOrFailed()
