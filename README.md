@@ -1,33 +1,12 @@
 {% raw %}
 ```yaml
 
-trigger: none
-
-stages:
-  - stage: NodeWarningCheck
-    variables:
-      AGENT_RESTRICT_EOL_NODE_VERSIONS: 'true'
-      AGENT_DISABLE_NODE6_TASKS: 'true'
-    jobs:
-      - job: yarn3replaceTest
-        pool:
-          name: 'agent-for-node-runner-test'
-        steps:
-          - task: NodeTool@0
-            displayName: Use Node 24
-            inputs:
-              versionSpec: '24.x'
-
-          - script: |
-              corepack enable
-              yarn --version
-            displayName: Enable Corepack (Yarn from packageManager)
-
-          - script: yarn install --immutable
-            displayName: yarn install
-
-          - script: yarn build
-            displayName: yarn build
+steps:
+  - task: JfrogCliV2@1
+    displayName: 'Verify JFrog Artifactory'
+    inputs:
+      jfrogPlatformConnection: 'jfrog-platform-prod'
+      command: 'jf rt ping'
 
 
 ```
@@ -46,21 +25,14 @@ stages:
 {% endraw %}
 
 
-- Yarn@3 task reference
+- ArtifactoryGenericUpload@2
 
 What the task does
 
-It's a thin wrapper around the yarn CLI. It runs a Yarn command, such as install or run build, inside your repo. It was modeled on the built-in npm task, so it usually offers these conveniences:
+It uploads files from the build agent to a repository in JFrog Artifactory, using the JFrog CLI under the hood
 
-- Command and arguments: you pass the command to run and its flags.
-- Working directory: it runs in a chosen project folder, which matters in monorepos.
-- Registry and auth: it can point at an Azure Artifacts feed or an external registry through a service connection. It handles the .npmrc credentials so you don't have to.
-- Log and error handling: it fails the step on a non-zero exit code and writes its output to the pipeline log.
+## Unmiantained
+https://marketplace.visualstudio.com/items?itemName=JFrog.jfrog-artifactory-vsts-extension
 
-## Depricated
-https://marketplace.visualstudio.com/items?itemName=geeklearningio.gl-vsts-tasks-yarn
-
-### Microsoft Recommendation
-https://learn.microsoft.com/en-us/azure/devops/pipelines/ecosystems/customize-javascript?view=azure-devops&tabs=yaml
-
- In modern Azure Pipelines, Microsoft recommends running Yarn directly via NodeTool@0
+### Replacement 
+https://marketplace.visualstudio.com/items?itemName=JFrog.jfrog-azure-devops-extension&utm_source=chatgpt.com
