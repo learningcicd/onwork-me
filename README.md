@@ -45,3 +45,11 @@ It's a thin wrapper around the yarn CLI. It runs a Yarn command, such as install
 - Working directory: it runs in a chosen project folder, which matters in monorepos.
 - Registry and auth: it can point at an Azure Artifacts feed or an external registry through a service connection. It handles the .npmrc credentials so you don't have to.
 - Log and error handling: it fails the step on a non-zero exit code and writes its output to the pipeline log.
+
+## Depricated
+https://marketplace.visualstudio.com/items?itemName=geeklearningio.gl-vsts-tasks-yarn
+
+### Microsoft Recommendation
+https://learn.microsoft.com/en-us/azure/devops/pipelines/ecosystems/customize-javascript?view=azure-devops&tabs=yaml
+
+ In modern Azure Pipelines, Microsoft recommends running Yarn directly via NodeTool@0
