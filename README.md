@@ -1,22 +1,33 @@
 {% raw %}
 ```yaml
 
-steps:
-- task: NodeTool@0
-  displayName: Use Node 24
-  inputs:
-    versionSpec: '24.x'
+trigger: none
 
-- script: |
-    corepack enable
-    yarn --version
-  displayName: Enable Corepack (Yarn from packageManager)
+stages:
+  - stage: NodeWarningCheck
+    variables:
+      AGENT_RESTRICT_EOL_NODE_VERSIONS: 'true'
+      AGENT_DISABLE_NODE6_TASKS: 'true'
+    jobs:
+      - job: yarn3replaceTest
+        pool:
+          name: 'agent-for-node-runner-test'
+        steps:
+          - task: NodeTool@0
+            displayName: Use Node 24
+            inputs:
+              versionSpec: '24.x'
 
-- script: yarn install --immutable
-  displayName: yarn install
+          - script: |
+              corepack enable
+              yarn --version
+            displayName: Enable Corepack (Yarn from packageManager)
 
-- script: yarn build
-  displayName: yarn build
+          - script: yarn install --immutable
+            displayName: yarn install
+
+          - script: yarn build
+            displayName: yarn build
 
 
 ```
