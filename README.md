@@ -1,25 +1,14 @@
 {% raw %}
 ```yaml
 
-
 steps:
-  - task: JFrogMaven@1
-    displayName: 'Build Maven and Deploy to JFrog'
+  - task: JFrogPublishBuildInfo@1
+    displayName: 'Publish JFrog Build Info'
     inputs:
-      mavenPomFile: 'pom.xml'
-      goals: 'clean deploy'
-
-      artifactoryResolverService: 'jfrog-artifactory-v2'
-      targetResolveReleaseRepo: 'libs-release'
-      targetResolveSnapshotRepo: 'libs-snapshot'
-
-      artifactoryDeployService: 'jfrog-artifactory-v2'
-      targetDeployReleaseRepo: 'libs-release-local'
-      targetDeploySnapshotRepo: 'libs-snapshot-local'
-
-      collectBuildInfo: true
+      artifactoryConnection: 'jfrog-artifactory-v2'
       buildName: '$(Build.DefinitionName)'
       buildNumber: '$(Build.BuildNumber)'
+      excludeEnvVars: '*password*;*psw*;*secret*;*key*;*token*;*auth*;'
 
 
 
@@ -41,12 +30,11 @@ steps:
 {% endraw %}
 
 
-- ArtifactoryGenericUpload@2
+- ArtifactoryPublishBuildInfo@1
 
 What the task does
-- It runs a Maven build and connects that build to JFrog Artifactory
-
+- It sends a record of your build to JFrog Artifactory. It collects data like were uploaded, which dependencies were resolved, and details about the environment and posts it to Artifactory as a single "build-info" entry.
 
 ### Replacement 
-- ArtifactoryMaven@1 has an official replacement in Azure DevOps: JFrogMaven@1.
-  https://marketplace.visualstudio.com/items?itemName=JFrog.jfrog-artifactory-vsts-extension&ssr=false
+- https://docs.jfrog.com/integrations/docs/jfrog-azure-devops-extension
+- https://marketplace.visualstudio.com/items?itemName=JFrog.jfrog-azure-devops-extension
